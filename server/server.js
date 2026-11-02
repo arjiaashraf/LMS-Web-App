@@ -1170,95 +1170,6 @@ app.get('/api/teacher/assignment-submissions/:assignmentId/:teacherId', (req, re
   });
 });
 
-// TEACHER - Grade Student Assignment
-app.post('/api/teacher/grade-submission', (req, res) => {
-  const {
-    assignment_id,
-    student_id,
-    teacher_id,
-    marks_obtained,
-    feedback
-  } = req.body;
-
-  const assignmentId = Number(assignment_id);
-  const studentId = Number(student_id);
-  const teacherId = Number(teacher_id);
-  const marks = Number(marks_obtained);
-
-  if (
-    !Number.isInteger(assignmentId) || assignmentId <= 0 ||
-    !Number.isInteger(studentId) || studentId <= 0 ||
-    !Number.isInteger(teacherId) || teacherId <= 0 ||
-    marks_obtained === null ||
-    marks_obtained === "" ||
-    !Number.isFinite(marks)
-  ) {
-    return res.status(400).json({
-      message: 'Please provide valid grading details.'
-    });
-  }
-
-  const checkQuery = `
-    SELECT
-      a.total_marks,
-      s.id AS submission_id
-    FROM assignments a
-    JOIN course_batches cb
-      ON cb.id = a.course_batch_id
-    JOIN assignment_submissions s
-      ON s.assignment_id = a.id
-     AND s.student_id = ?
-    WHERE a.id = ?
-      AND cb.instructor_id = ?
-    ORDER BY s.id DESC
-    LIMIT 1
-  `;
-
-  db.query(checkQuery, [studentId, assignmentId, teacherId], (err, rows) => {
-    if (err) {
-      console.error('Grading check error:', err);
-      return res.status(500).json({ message: 'Database error.' });
-    }
-
-    if (rows.length === 0) {
-      return res.status(403).json({
-        message: 'Submission not found or teacher not assigned.'
-      });
-    }
-
-    if (marks < 0 || marks > rows[0].total_marks) {
-      return res.status(400).json({
-        message: `Marks must be between 0 and ${rows[0].total_marks}.`
-      });
-    }
-
-    const updateQuery = `
-      UPDATE assignment_submissions
-      SET marks_obtained = ?,
-          feedback = ?,
-          status = 'Graded'
-      WHERE id = ?
-    `;
-
-    db.query(
-      updateQuery,
-      [marks, feedback || '', rows[0].submission_id],
-      (updateErr) => {
-        if (updateErr) {
-          console.error('Grading error:', updateErr);
-          return res.status(500).json({
-            message: 'Failed to save grade.'
-          });
-        }
-
-        res.json({
-          message: 'Assignment graded successfully!'
-        });
-      }
-    );
-  });
-});
-
 
 app.get('/api/admin/course-instructors/:courseId', (req, res) => {
   const courseId = req.params.courseId;
@@ -1389,6 +1300,96 @@ app.get('/api/admin/course-students/:courseId', (req, res) => {
       console.error('Enrolled students error:', err);
       return res.status(500).json({
         message: 'Failed to load enrolled students'
+      });
+    }
+
+    res.json(results);
+  });
+});
+
+ // ADMIN - Get All Assignments
+app.get('/api/admin/assignments', (req, res) => {
+  const query = `
+    SELECT
+      a.id,
+      a.course_id,
+      a.course_batch_id,
+      a.title,
+      a.instructions,
+      a.issue_date,
+      a.due_date,
+      a.total_marks,
+      c.title AS course_title,
+      cb.instructor_id,
+      u.name AS instructor_name
+    FROM assignments a
+    JOIN courses c ON c.id = a.course_id
+    LEFT JOIN course_batches cb
+      ON cb.id = a.course_batch_id
+    LEFT JOIN users u
+      ON u.id = cb.instructor_id
+    ORDER BY a.issue_date DESC, a.id DESC
+  `;
+
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error('Admin assignments error:', err);
+      return res.status(500).json({
+        message: 'Failed to load assignments'
+      });
+    }
+
+    res.json(results);
+  });
+});
+
+
+ // ADMIN - Get Assignment Submissions and Grading
+app.get('/api/admin/assignment-submissions/:assignmentId', (req, res) => {
+  const assignmentId = Number(req.params.assignmentId);
+
+  if (!Number.isInteger(assignmentId) || assignmentId <= 0) {
+    return res.status(400).json({
+      message: 'Invalid assignment ID'
+    });
+  }
+
+  const query = `
+    SELECT
+      u.id AS student_id,
+      u.name AS student_name,
+      u.email AS student_email,
+      s.id AS submission_id,
+      s.submission_text,
+      s.file_url,
+      s.submitted_at,
+      COALESCE(s.status, 'Not Submitted') AS status,
+      s.marks_obtained,
+      s.feedback
+    FROM assignments a
+    JOIN course_enrollments ce
+      ON ce.course_batch_id = a.course_batch_id
+      AND ce.status = 'Active'
+    JOIN users u
+      ON u.id = ce.student_id
+    LEFT JOIN assignment_submissions s
+      ON s.id = (
+        SELECT s2.id
+        FROM assignment_submissions s2
+        WHERE s2.assignment_id = a.id
+          AND s2.student_id = ce.student_id
+        ORDER BY s2.submitted_at DESC, s2.id DESC
+        LIMIT 1
+      )
+    WHERE a.id = ?
+    ORDER BY u.name ASC
+  `;
+
+  db.query(query, [assignmentId], (err, results) => {
+    if (err) {
+      console.error('Admin submissions error:', err);
+      return res.status(500).json({
+        message: 'Failed to load assignment submissions'
       });
     }
 
