@@ -290,7 +290,7 @@ app.get('/api/students', (req, res) => {
 // STUDENT - Get All Published Courses Catalog
 app.get('/api/student/courses', (req, res) => {
   const query = `
-    SELECT c.*, 
+    SELECT c.*,
            GROUP_CONCAT(DISTINCT inst.name SEPARATOR ', ') AS assigned_instructors
     FROM courses c
     LEFT JOIN course_batches cb ON cb.course_id = c.id
@@ -300,9 +300,137 @@ app.get('/api/student/courses', (req, res) => {
     GROUP BY c.id
     ORDER BY c.id DESC
   `;
+
   db.query(query, (err, results) => {
-    if (err) return res.status(500).json({ message: "Database error", error: err });
+    if (err) return res.status(500).json({
+      message: "Database error",
+      error: err
+    });
+
     res.json(results);
+  });
+});
+// STUDENT - Submit or Update Assignment
+app.post('/api/student/submit-assignment', (req, res) => {
+  const {
+    assignment_id,
+    student_id,
+    submission_text,
+    file_url
+  } = req.body;
+
+  const assignmentId = Number(assignment_id);
+  const studentId = Number(student_id);
+
+  if (
+    !Number.isInteger(assignmentId) || assignmentId <= 0 ||
+    !Number.isInteger(studentId) || studentId <= 0
+  ) {
+    return res.status(400).json({
+      message: 'Invalid assignment or student ID.'
+    });
+  }
+
+  if (!submission_text?.trim() && !file_url) {
+    return res.status(400).json({
+      message: 'Please provide an answer or attach a file.'
+    });
+  }
+
+  // Check whether student is actively enrolled in the assignment batch
+  const checkQuery = `
+    SELECT a.id
+    FROM assignments a
+    JOIN course_enrollments ce
+      ON ce.course_batch_id = a.course_batch_id
+    WHERE a.id = ?
+      AND ce.student_id = ?
+      AND ce.status = 'Active'
+    LIMIT 1
+  `;
+
+  db.query(checkQuery, [assignmentId, studentId], (checkErr, results) => {
+    if (checkErr) {
+      console.error('Submission enrollment check error:', checkErr);
+      return res.status(500).json({ message: 'Database error.' });
+    }
+
+    if (results.length === 0) {
+      return res.status(403).json({
+        message: 'You are not enrolled in this assignment batch.'
+      });
+    }
+
+    // Check existing submission
+    db.query(
+      `SELECT id, status
+       FROM assignment_submissions
+       WHERE assignment_id = ? AND student_id = ?
+       LIMIT 1`,
+      [assignmentId, studentId],
+      (findErr, submissions) => {
+        if (findErr) {
+          return res.status(500).json({ message: 'Database error.' });
+        }
+
+        if (submissions.length > 0) {
+          if (submissions[0].status === 'Graded') {
+            return res.status(400).json({
+              message: 'Graded assignments cannot be updated.'
+            });
+          }
+
+          const updateQuery = `
+            UPDATE assignment_submissions
+            SET submission_text = ?,
+                file_url = ?,
+                submitted_at = CURRENT_TIMESTAMP,
+                status = 'Submitted'
+            WHERE id = ?
+          `;
+
+          return db.query(
+            updateQuery,
+            [submission_text || '', file_url || null, submissions[0].id],
+            (updateErr) => {
+              if (updateErr) {
+                console.error('Submission update error:', updateErr);
+                return res.status(500).json({
+                  message: 'Failed to update assignment.'
+                });
+              }
+
+              res.json({
+                message: 'Assignment updated successfully!'
+              });
+            }
+          );
+        }
+
+        const insertQuery = `
+          INSERT INTO assignment_submissions
+          (assignment_id, student_id, submission_text, file_url, status)
+          VALUES (?, ?, ?, ?, 'Submitted')
+        `;
+
+        db.query(
+          insertQuery,
+          [assignmentId, studentId, submission_text || '', file_url || null],
+          (insertErr) => {
+            if (insertErr) {
+              console.error('Assignment submission error:', insertErr);
+              return res.status(500).json({
+                message: 'Failed to submit assignment.'
+              });
+            }
+
+            res.status(201).json({
+              message: 'Assignment submitted successfully!'
+            });
+          }
+        );
+      }
+    );
   });
 });
 
@@ -791,7 +919,79 @@ app.get('/api/instructor/batch-students/:batchId', (req, res) => {
 
 
 // ================= ASSIGNMENTS & ATTENDANCE MODULES =================
+// STUDENT - Get Assignments for Active Enrolled Batches
+// STUDENT - Get Assignments with Instructor and Submission Status
+app.get('/api/student/assignments/:studentId', (req, res) => {
+  const studentId = Number(req.params.studentId);
 
+  if (!Number.isInteger(studentId) || studentId <= 0) {
+    return res.status(400).json({
+      message: 'Invalid student ID'
+    });
+  }
+
+  const query = `
+    SELECT
+      a.id,
+      a.course_id,
+      a.course_batch_id,
+      a.title,
+      a.instructions,
+      a.issue_date,
+      a.due_date,
+      a.total_marks,
+
+      c.title AS course_title,
+
+      COALESCE(u.name, 'Instructor') AS instructor_name,
+
+      s.id AS submission_id,
+      COALESCE(s.status, 'Pending') AS status,
+      s.marks_obtained,
+      s.feedback
+
+    FROM assignments a
+
+    JOIN course_batches cb
+      ON cb.id = a.course_batch_id
+
+    JOIN courses c
+      ON c.id = cb.course_id
+
+    LEFT JOIN users u
+      ON u.id = cb.instructor_id
+
+    LEFT JOIN assignment_submissions s
+      ON s.id = (
+        SELECT MAX(s2.id)
+        FROM assignment_submissions s2
+        WHERE s2.assignment_id = a.id
+          AND s2.student_id = ?
+      )
+
+    WHERE EXISTS (
+      SELECT 1
+      FROM course_enrollments ce
+      WHERE ce.course_batch_id = a.course_batch_id
+        AND ce.student_id = ?
+        AND ce.status = 'Active'
+    )
+
+    ORDER BY a.due_date ASC, a.id DESC
+  `;
+
+  db.query(query, [studentId, studentId], (err, results) => {
+    if (err) {
+      console.error('Student assignments error:', err);
+
+      return res.status(500).json({
+        message: 'Failed to load student assignments'
+      });
+    }
+
+    res.json(results);
+  });
+});
 // TEACHER - Get Assigned Batches for Assignment Creation
 app.get('/api/teacher/assignment-batches/:teacherId', (req, res) => {
   const teacherId = Number(req.params.teacherId);

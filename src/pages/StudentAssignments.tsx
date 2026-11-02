@@ -236,7 +236,14 @@ function StudentAssignments() {
                     <div className="flex flex-wrap gap-5 mt-4 text-sm">
                       <div className="flex items-center gap-2 text-slate-500">
                         <CalendarDays size={17} />
-                        <span>Due: {assignment.due_date}</span>
+                        <span>
+  Due: {new Date(assignment.due_date).toLocaleDateString("en-PK", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "Asia/Karachi",
+  })}
+</span>
                       </div>
                       <div className="flex items-center gap-2 text-slate-500">
                         <Award size={17} />
@@ -254,20 +261,36 @@ function StudentAssignments() {
                 </div>
 
                 {/* RIGHT */}
-                <div className="flex lg:flex-col gap-3 lg:min-w-32">
-                  <button
-                    onClick={() => {
-                      setSelectedAssignment(assignment);
-                      setSubmissionText("");
-                      setFileUrl("");
-                      setFileName("");
-                      setShowSubmitModal(true);
-                    }}
-                    className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg font-medium transition flex items-center justify-center gap-2"
-                  >
-                    <Send size={16} /> {assignment.status ? "Update Work" : "Submit Work"}
-                  </button>
-                </div>
+<div className="flex lg:flex-col gap-3 lg:min-w-32">
+  <button
+    type="button"
+    disabled={assignment.status === "Submitted" || assignment.status === "Graded"}
+    onClick={() => {
+      setSelectedAssignment(assignment);
+      setSubmissionText("");
+      setFileUrl("");
+      setFileName("");
+      setShowSubmitModal(true);
+    }}
+    className={`px-5 py-2.5 rounded-lg font-medium transition flex items-center justify-center gap-2 ${
+      assignment.status === "Submitted" || assignment.status === "Graded"
+        ? "bg-gray-300 text-gray-600 cursor-not-allowed"
+        : "bg-blue-600 hover:bg-blue-700 text-white"
+    }`}
+  >
+    {assignment.status === "Submitted" || assignment.status === "Graded" ? (
+      <CheckCircle size={16} />
+    ) : (
+      <Send size={16} />
+    )}
+
+    {assignment.status === "Graded"
+      ? "Graded"
+      : assignment.status === "Submitted"
+      ? "Submitted"
+      : "Submit Work"}
+  </button>
+</div>
               </div>
             </div>
           ))}
