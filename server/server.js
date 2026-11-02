@@ -1119,6 +1119,147 @@ app.post('/api/teacher/assignments', (req, res) => {
   });
 });
 
+ // TEACHER - View Student Assignment Submissions
+app.get('/api/teacher/assignment-submissions/:assignmentId/:teacherId', (req, res) => {
+  const assignmentId = Number(req.params.assignmentId);
+  const teacherId = Number(req.params.teacherId);
+
+  if (!Number.isInteger(assignmentId) || assignmentId <= 0 ||
+      !Number.isInteger(teacherId) || teacherId <= 0) {
+    return res.status(400).json({ message: 'Invalid IDs.' });
+  }
+
+  const query = `
+    SELECT
+      s.id AS submission_id,
+      s.assignment_id,
+      s.student_id,
+      u.name AS student_name,
+      u.email AS student_email,
+      s.submission_text,
+      s.file_url,
+      s.submitted_at,
+      s.marks_obtained,
+      s.feedback,
+      s.status
+    FROM assignment_submissions s
+    JOIN assignments a ON a.id = s.assignment_id
+    JOIN course_batches cb ON cb.id = a.course_batch_id
+    JOIN users u ON u.id = s.student_id
+    WHERE s.assignment_id = ?
+      AND cb.instructor_id = ?
+      AND EXISTS (
+        SELECT 1
+        FROM course_enrollments ce
+        WHERE ce.student_id = s.student_id
+          AND ce.course_batch_id = a.course_batch_id
+          AND ce.status = 'Active'
+      )
+    ORDER BY s.submitted_at DESC
+  `;
+
+  db.query(query, [assignmentId, teacherId], (err, results) => {
+    if (err) {
+      console.error('Teacher submissions error:', err);
+      return res.status(500).json({
+        message: 'Failed to load submissions.'
+      });
+    }
+
+    res.json(results);
+  });
+});
+
+// TEACHER - Grade Student Assignment
+app.post('/api/teacher/grade-submission', (req, res) => {
+  const {
+    assignment_id,
+    student_id,
+    teacher_id,
+    marks_obtained,
+    feedback
+  } = req.body;
+
+  const assignmentId = Number(assignment_id);
+  const studentId = Number(student_id);
+  const teacherId = Number(teacher_id);
+  const marks = Number(marks_obtained);
+
+  if (
+    !Number.isInteger(assignmentId) || assignmentId <= 0 ||
+    !Number.isInteger(studentId) || studentId <= 0 ||
+    !Number.isInteger(teacherId) || teacherId <= 0 ||
+    marks_obtained === null ||
+    marks_obtained === "" ||
+    !Number.isFinite(marks)
+  ) {
+    return res.status(400).json({
+      message: 'Please provide valid grading details.'
+    });
+  }
+
+  const checkQuery = `
+    SELECT
+      a.total_marks,
+      s.id AS submission_id
+    FROM assignments a
+    JOIN course_batches cb
+      ON cb.id = a.course_batch_id
+    JOIN assignment_submissions s
+      ON s.assignment_id = a.id
+     AND s.student_id = ?
+    WHERE a.id = ?
+      AND cb.instructor_id = ?
+    ORDER BY s.id DESC
+    LIMIT 1
+  `;
+
+  db.query(checkQuery, [studentId, assignmentId, teacherId], (err, rows) => {
+    if (err) {
+      console.error('Grading check error:', err);
+      return res.status(500).json({ message: 'Database error.' });
+    }
+
+    if (rows.length === 0) {
+      return res.status(403).json({
+        message: 'Submission not found or teacher not assigned.'
+      });
+    }
+
+    if (marks < 0 || marks > rows[0].total_marks) {
+      return res.status(400).json({
+        message: `Marks must be between 0 and ${rows[0].total_marks}.`
+      });
+    }
+
+    const updateQuery = `
+      UPDATE assignment_submissions
+      SET marks_obtained = ?,
+          feedback = ?,
+          status = 'Graded'
+      WHERE id = ?
+    `;
+
+    db.query(
+      updateQuery,
+      [marks, feedback || '', rows[0].submission_id],
+      (updateErr) => {
+        if (updateErr) {
+          console.error('Grading error:', updateErr);
+          return res.status(500).json({
+            message: 'Failed to save grade.'
+          });
+        }
+
+        res.json({
+          message: 'Assignment graded successfully!'
+        });
+      }
+    );
+  });
+});
+
+
 app.get('/api/admin/course-instructors/:courseId', (req, res) => {
   const courseId = req.params.courseId;
   const query = `

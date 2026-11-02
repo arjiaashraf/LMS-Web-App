@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+
 import {
   FileText,
   Plus,
@@ -9,7 +10,8 @@ import {
   X,
   CheckCircle,
   Clock,
-  Award
+  Award,
+  Eye
 } from "lucide-react";
 
 type Batch = {
@@ -31,15 +33,15 @@ type Assignment = {
   total_marks: number;
   due_date: string;
 };
-
 type Submission = {
   submission_id: number;
   student_id: number;
   student_name: string;
   student_email: string;
-  file_url: string;
+  submission_text: string | null;
+  file_url: string | null;
   submitted_at: string;
-  marks_obtained: number | null;
+  marks_obtained: number | string | null;
   feedback: string | null;
   status: string;
 };
@@ -66,6 +68,9 @@ function InstructorAssignments({ teacherId, onBack }: InstructorAssignmentsProps
   const [description, setDescription] = useState("");
   const [totalMarks, setTotalMarks] = useState("");
   const [dueDate, setDueDate] = useState("");
+  const [gradingSubmission, setGradingSubmission] = useState<Submission | null>(null);
+const [gradeMarks, setGradeMarks] = useState("");
+const [gradeFeedback, setGradeFeedback] = useState("");
 
   const navigate = useNavigate();
 
@@ -169,6 +174,18 @@ function InstructorAssignments({ teacherId, onBack }: InstructorAssignmentsProps
 
   const handleGradeSubmission = async (studentId: number, marks: number | string, feedback: string) => {
     if (!selectedAssignment) return;
+    if (
+  marks === "" ||
+  marks === null ||
+  !Number.isFinite(Number(marks)) ||
+  Number(marks) < 0 ||
+  Number(marks) > selectedAssignment.total_marks
+) {
+  alert(
+    `Please enter valid marks between 0 and ${selectedAssignment.total_marks}.`
+  );
+  return;
+}
 
     setSubmitting(true);
     try {
@@ -303,6 +320,7 @@ function InstructorAssignments({ teacherId, onBack }: InstructorAssignmentsProps
                   <thead>
                     <tr className="border-b text-slate-600 text-sm bg-slate-50">
                       <th className="p-3 font-semibold">Student Name</th>
+                      <th className="p-3 font-semibold">Student Answer</th>
                       <th className="p-3 font-semibold">Submission File</th>
                       <th className="p-3 font-semibold w-32">Marks (/{selectedAssignment.total_marks})</th>
                       <th className="p-3 font-semibold">Feedback</th>
@@ -310,27 +328,87 @@ function InstructorAssignments({ teacherId, onBack }: InstructorAssignmentsProps
                       <th className="p-3 font-semibold text-center w-24">Action</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y text-slate-700">
-                    {submissions.map((sub) => (
-                      <tr key={sub.student_id} className="hover:bg-slate-50">
-                        <td className="p-3 font-medium">
-                          {sub.student_name}
-                          <span className="block text-xs text-slate-400">{sub.student_email}</span>
-                        </td>
-                        <td className="p-3">
-                          {sub.file_url ? (
-                            <a
-                              href={`http://localhost:5000${sub.file_url}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-purple-600 hover:underline text-sm font-medium flex items-center gap-1"
-                            >
-                              Download File
-                            </a>
-                          ) : (
-                            <span className="text-slate-400 text-sm">Not Submitted</span>
-                          )}
-                        </td>
+                 
+<tbody className="divide-y text-slate-700">
+  {submissions.map((sub) => (
+    <tr key={sub.student_id} className="hover:bg-slate-50">
+
+      {/* Student Name */}
+      <td className="p-3 font-medium">
+        {sub.student_name}
+        <span className="block text-xs text-slate-400">
+          {sub.student_email}
+        </span>
+      </td>
+
+      {/* Student Answer */}
+      <td className="p-3">
+        {sub.submission_text ? (
+          <p className="text-sm text-slate-700 whitespace-pre-wrap max-w-xs">
+            {sub.submission_text}
+          </p>
+        ) : (
+          <span className="text-slate-400 text-sm">
+            No text answer
+          </span>
+        )}
+      </td>
+
+      {/* Submission File */}
+      
+<td className="p-3">
+  {sub.file_url ? (
+    <button
+      type="button"
+      onClick={async () => {
+        try {
+          const fileUrl = sub.file_url!;
+
+          const fullUrl =
+            fileUrl.startsWith("data:") ||
+            fileUrl.startsWith("http")
+              ? fileUrl
+              : `http://localhost:5000${fileUrl}`;
+
+          // Open a blank tab immediately to avoid popup blocking
+          const previewTab = window.open("", "_blank");
+
+          if (!previewTab) {
+            alert("Please allow pop-ups to preview the file.");
+            return;
+          }
+
+          const response = await fetch(fullUrl);
+
+          if (!response.ok) {
+            previewTab.close();
+            alert("Unable to load the file.");
+            return;
+          }
+
+          const blob = await response.blob();
+          const blobUrl = URL.createObjectURL(blob);
+
+          previewTab.location.href = blobUrl;
+        } catch (error) {
+          console.error("File preview error:", error);
+          alert("Unable to preview this file.");
+        }
+      }}
+      className="flex items-center gap-2 text-purple-600 hover:text-purple-800 font-medium text-sm cursor-pointer"
+    >
+      <Eye size={16} />
+      View File
+    </button>
+  ) : (
+    <span className="text-slate-400 text-sm">
+      No file attached
+    </span>
+  )}
+</td>
+
+      {/* Marks column starts here — keep your existing code */}
+
                         <td className="p-3">
                           <input
                             type="number"
@@ -360,13 +438,21 @@ function InstructorAssignments({ teacherId, onBack }: InstructorAssignmentsProps
                           </span>
                         </td>
                         <td className="p-3 text-center">
-                          <button
-                            onClick={() => handleGradeSubmission(sub.student_id, sub.marks_obtained ?? "", sub.feedback ?? "")}
-                            disabled={submitting}
-                            className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer"
-                          >
-                            Save
-                          </button>
+     <button
+  type="button"
+  onClick={() => {
+    setGradingSubmission(sub);
+    setGradeMarks(
+      sub.marks_obtained !== null
+        ? String(sub.marks_obtained)
+        : ""
+    );
+    setGradeFeedback(sub.feedback || "");
+  }}
+  className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg text-sm font-medium transition cursor-pointer"
+>
+  {sub.status === "Graded" ? "Edit Grade" : "Grade"}
+</button>
                         </td>
                       </tr>
                     ))}
@@ -377,6 +463,98 @@ function InstructorAssignments({ teacherId, onBack }: InstructorAssignmentsProps
           )}
         </div>
       )}
+
+      
+{/* GRADING MODAL */}
+{gradingSubmission && selectedAssignment && (
+  <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+    <div className="bg-white rounded-xl max-w-lg w-full p-6 shadow-xl">
+      <div className="flex justify-between items-center border-b pb-4 mb-5">
+        <div>
+          <h3 className="text-xl font-bold text-slate-800">
+            Grade Assignment
+          </h3>
+          <p className="text-sm text-slate-500 mt-1">
+            Student: {gradingSubmission.student_name}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setGradingSubmission(null)}
+          className="text-slate-400 hover:text-slate-600"
+        >
+          <X size={20} />
+        </button>
+      </div>
+
+      <div className="space-y-5">
+        <div>
+          <label className="block text-sm font-semibold text-slate-700 mb-2">
+            Obtained Marks (Out of {selectedAssignment.total_marks})
+          </label>
+          <input
+            type="number"
+            min={0}
+            max={selectedAssignment.total_marks}
+            value={gradeMarks}
+            onChange={(e) => setGradeMarks(e.target.value)}
+            placeholder="Enter obtained marks"
+            className="w-full border border-slate-300 rounded-lg px-4 py-3 outline-none focus:border-purple-500"
+          />
+        </div>
+
+        <div>
+          <label className="block text-sm font-semibold text-slate-700 mb-2">
+            Teacher Feedback
+          </label>
+          <textarea
+            rows={5}
+            value={gradeFeedback}
+            onChange={(e) => setGradeFeedback(e.target.value)}
+            placeholder="Write feedback for the student..."
+            className="w-full border border-slate-300 rounded-lg px-4 py-3 outline-none focus:border-purple-500 resize-none"
+          />
+        </div>
+
+        <div className="flex justify-end gap-3 pt-4 border-t">
+          <button
+            type="button"
+            onClick={() => setGradingSubmission(null)}
+            className="px-5 py-2.5 bg-slate-100 text-slate-700 rounded-lg font-medium"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={async () => {
+              if (
+                gradeMarks.trim() === "" ||
+                !Number.isFinite(Number(gradeMarks)) ||
+                Number(gradeMarks) < 0 ||
+                Number(gradeMarks) > selectedAssignment.total_marks
+              ) {
+                alert(`Enter marks between 0 and ${selectedAssignment.total_marks}`);
+                return;
+              }
+
+              await handleGradeSubmission(
+                gradingSubmission.student_id,
+                gradeMarks,
+                gradeFeedback
+              );
+              setGradingSubmission(null);
+            }}
+            className="px-5 py-2.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-semibold disabled:opacity-50"
+          >
+            {submitting ? "Saving..." : "Save Grade"}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+)}
+
 
       {/* CREATE ASSIGNMENT MODAL */}
       {showModal && (
