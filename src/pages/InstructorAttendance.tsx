@@ -17,6 +17,7 @@ type ClassSession = {
   start_time: string;
   end_time: string;
   status: string;
+  course_batch_id: number | null;
 };
 
 type Student = {
@@ -50,47 +51,87 @@ function InstructorAttendance({ onBack }: InstructorAttendanceProps) {
     fetchTeacherSessions();
   }, []);
 
-  const fetchTeacherSessions = async () => {
-    try {
-      const res = await fetch(`http://localhost:5000/api/teacher/classes/${teacherUser.id}`);
-      const data = await res.json();
-      if (res.ok) {
-        setSessions(data);
-      }
-    } catch (err) {
-      console.error("Error fetching teacher sessions:", err);
+  
+const fetchTeacherSessions = async () => {
+  try {
+    const res = await fetch(
+      `http://localhost:5000/api/teacher/class-schedules/${teacherUser.id}`
+    );
+
+    if (!res.ok) {
+      throw new Error("Failed to fetch class sessions");
     }
-  };
 
-  const handleSelectSession = async (session: ClassSession) => {
-    setSelectedSession(session);
-    setLoading(true);
-    try {
-      const studentsRes = await fetch(`http://localhost:5000/api/teacher/course-students/${session.course_id}`);
-      const studentsData = await studentsRes.json();
+    const data = await res.json();
+    setSessions(data);
+  } catch (err) {
+    console.error("Error fetching teacher sessions:", err);
+  }
+};
 
-      const attendanceRes = await fetch(`http://localhost:5000/api/teacher/attendance/${session.id}`);
-      let attendanceData = [];
-      if (attendanceRes.ok) {
-        attendanceData = await attendanceRes.json();
-      }
 
-      if (studentsRes.ok) {
-        setStudents(studentsData);
-        
-        const initialAttendance: { [key: number]: AttendanceStatus } = {};
-        studentsData.forEach((st: Student) => {
-          const existingRecord = attendanceData.find((ar: any) => ar.student_id === st.id);
-          initialAttendance[st.id] = existingRecord ? existingRecord.status : "Present";
-        });
-        setAttendance(initialAttendance);
-      }
-    } catch (err) {
-      console.error("Error fetching students or attendance:", err);
-    } finally {
-      setLoading(false);
+  
+const handleSelectSession = async (session: ClassSession) => {
+  setSelectedSession(session);
+  setLoading(true);
+  setStudents([]);
+  setAttendance({});
+
+  try {
+    if (!session.course_batch_id) {
+      alert("This class has no batch assigned.");
+      return;
     }
-  };
+
+    // Fetch students of the selected batch
+    const studentsRes = await fetch(
+      `http://localhost:5000/api/admin/class-batch-students/${session.course_batch_id}`
+    );
+
+    if (!studentsRes.ok) {
+      throw new Error("Failed to fetch batch students");
+    }
+
+    const studentsData: Student[] = await studentsRes.json();
+
+    // Fetch previously saved attendance
+    const attendanceRes = await fetch(
+      `http://localhost:5000/api/teacher/attendance/${session.id}`
+    );
+
+    let attendanceData: {
+      student_id: number;
+      status: AttendanceStatus;
+    }[] = [];
+
+    if (attendanceRes.ok) {
+      attendanceData = await attendanceRes.json();
+    }
+
+    setStudents(studentsData);
+
+    const initialAttendance: {
+      [studentId: number]: AttendanceStatus;
+    } = {};
+
+    studentsData.forEach((student) => {
+      const existingRecord = attendanceData.find(
+        (record) => record.student_id === student.id
+      );
+
+      initialAttendance[student.id] = existingRecord
+        ? existingRecord.status
+        : "Present";
+    });
+
+    setAttendance(initialAttendance);
+  } catch (err) {
+    console.error("Error loading attendance:", err);
+    alert("Failed to load students for this batch.");
+  } finally {
+    setLoading(false);
+  }
+};
 
   const handleStatusChange = (studentId: number, status: AttendanceStatus) => {
     setAttendance((prev) => ({

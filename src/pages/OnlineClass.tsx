@@ -28,6 +28,7 @@ type AdminClassSchedule = {
   meeting_link: string;
   status: "Scheduled" | "Completed" | "Cancelled" | "Rescheduled";
   enrolled_students_count: number;
+  course_batch_id: number;
 };
 
 type EnrolledStudent = {
@@ -82,7 +83,7 @@ function OnlineClasses() {
     setEnrolledStudents([]);
 
     try {
-      const res = await fetch(`http://localhost:5000/api/admin/course-students/${cls.course_id}`);
+      const res = await fetch( `http://localhost:5000/api/admin/class-batch-students/${cls.course_batch_id}`);
       const data = await res.json();
       if (res.ok) {
         setEnrolledStudents(data);
@@ -256,6 +257,7 @@ function OnlineClasses() {
             <div className="space-y-3 text-sm text-slate-600">
               <div className="bg-slate-50 p-4 rounded-xl space-y-2 border">
                 <p><strong>Course:</strong> {selectedClass.course_title}</p>
+                <p><strong>Batch:</strong> {selectedClass.course_batch_id}</p>
                 <p><strong>Instructor:</strong> {selectedClass.instructor_name}</p>
                 <p><strong>Date:</strong> {selectedClass.session_date.split("T")[0]}</p>
                 <p><strong>Timing:</strong> {selectedClass.start_time} - {selectedClass.end_time} ({selectedClass.time_zone})</p>

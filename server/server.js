@@ -1588,6 +1588,449 @@ app.put('/api/teacher/class-schedule/status/:scheduleId', (req, res) => {
 });
 
 
+// STUDENT - Get Online Classes for Enrolled Batches
+app.get('/api/student/class-schedules/:studentId', (req, res) => {
+  const studentId = Number(req.params.studentId);
+
+  if (!Number.isInteger(studentId) || studentId <= 0) {
+    return res.status(400).json({
+      message: 'Invalid student ID'
+    });
+  }
+
+  const query = `
+    SELECT
+      cs.id,
+      cs.course_id,
+      cs.course_batch_id,
+      c.title AS course_title,
+      u.name AS instructor_name,
+      cs.session_date,
+      cs.start_time,
+      cs.end_time,
+      cs.time_zone,
+      cs.meeting_link,
+      cs.status
+    FROM class_schedules cs
+    JOIN courses c
+      ON c.id = cs.course_id
+    JOIN users u
+      ON u.id = cs.instructor_id
+    WHERE EXISTS (
+      SELECT 1
+      FROM course_enrollments ce
+      WHERE ce.course_batch_id = cs.course_batch_id
+        AND ce.student_id = ?
+        AND ce.status = 'Active'
+    )
+    ORDER BY cs.session_date ASC, cs.start_time ASC
+  `;
+
+  db.query(query, [studentId], (err, results) => {
+    if (err) {
+      console.error('Student class schedules error:', err);
+      return res.status(500).json({
+        message: 'Failed to load student online classes'
+      });
+    }
+
+    res.json(results);
+  });
+});
+
+
+ // ADMIN - Get All Online Classes
+app.get('/api/admin/class-schedules', (req, res) => {
+  const query = `
+    SELECT
+      cs.id,
+      cs.course_id,
+      cs.course_batch_id,
+      c.title AS course_title,
+      cs.instructor_id,
+      u.name AS instructor_name,
+      cs.session_date,
+      cs.start_time,
+      cs.end_time,
+      cs.time_zone,
+      cs.meeting_link,
+      cs.status,
+      (
+        SELECT COUNT(DISTINCT ce.student_id)
+        FROM course_enrollments ce
+        WHERE ce.course_batch_id = cs.course_batch_id
+          AND ce.status = 'Active'
+      ) AS enrolled_students_count
+    FROM class_schedules cs
+    JOIN courses c ON c.id = cs.course_id
+    JOIN users u ON u.id = cs.instructor_id
+    ORDER BY cs.session_date DESC, cs.start_time DESC
+  `;
+
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error('Admin class schedules error:', err);
+      return res.status(500).json({
+        message: 'Failed to load online classes'
+      });
+    }
+
+    res.json(results);
+  });
+});
+
+
+// ADMIN - Get Active Students of a Specific Class Batch
+app.get('/api/admin/class-batch-students/:batchId', (req, res) => {
+  const batchId = Number(req.params.batchId);
+
+  if (!Number.isInteger(batchId) || batchId <= 0) {
+    return res.status(400).json({
+      message: 'Invalid batch ID'
+    });
+  }
+
+  const query = `
+    SELECT DISTINCT
+      u.id,
+      u.name,
+      u.email
+    FROM course_enrollments ce
+    JOIN users u ON u.id = ce.student_id
+    WHERE ce.course_batch_id = ?
+      AND ce.status = 'Active'
+    ORDER BY u.name ASC
+  `;
+
+  db.query(query, [batchId], (err, results) => {
+    if (err) {
+      console.error('Admin batch students error:', err);
+      return res.status(500).json({
+        message: 'Failed to load batch students'
+      });
+    }
+
+    res.json(results);
+  });
+});
+
+// TEACHER - GET SAVED ATTENDANCE
+app.get("/api/teacher/attendance/:sessionId", (req, res) => {
+  const sessionId = Number(req.params.sessionId);
+
+  if (!Number.isInteger(sessionId) || sessionId <= 0) {
+    return res.status(400).json({
+      message: "Invalid session ID",
+    });
+  }
+
+  const query = `
+    SELECT student_id, status
+    FROM attendance_records
+    WHERE class_session_id = ?
+  `;
+
+  db.query(query, [sessionId], (err, results) => {
+    if (err) {
+      console.error("Fetch attendance error:", err);
+      return res.status(500).json({
+        message: "Failed to fetch attendance",
+      });
+    }
+
+    res.json(results);
+  });
+});
+
+
+// TEACHER - SAVE / UPDATE ATTENDANCE
+app.post("/api/teacher/attendance", (req, res) => {
+  const {
+    class_session_id,
+    teacher_id,
+    attendance_data,
+  } = req.body;
+
+  const sessionId = Number(class_session_id);
+  const teacherId = Number(teacher_id);
+
+  if (
+    !Number.isInteger(sessionId) ||
+    !Number.isInteger(teacherId) ||
+    !Array.isArray(attendance_data) ||
+    attendance_data.length === 0
+  ) {
+    return res.status(400).json({
+      message: "Invalid attendance data",
+    });
+  }
+
+  const allowedStatuses = [
+    "Present",
+    "Absent",
+    "Late",
+    "Excused",
+  ];
+
+  const studentIds = attendance_data.map((record) =>
+    Number(record.student_id)
+  );
+
+  if (
+    studentIds.some(
+      (id) => !Number.isInteger(id) || id <= 0
+    ) ||
+    new Set(studentIds).size !== studentIds.length ||
+    attendance_data.some(
+      (record) => !allowedStatuses.includes(record.status)
+    )
+  ) {
+    return res.status(400).json({
+      message: "Invalid student IDs or attendance statuses",
+    });
+  }
+
+  // Verify that this session belongs to the instructor
+  const sessionQuery = `
+    SELECT id, course_batch_id, status
+    FROM class_schedules
+    WHERE id = ? AND instructor_id = ?
+  `;
+
+  db.query(
+    sessionQuery,
+    [sessionId, teacherId],
+    (sessionErr, sessions) => {
+      if (sessionErr) {
+        console.error(sessionErr);
+        return res.status(500).json({
+          message: "Failed to verify class session",
+        });
+      }
+
+      if (sessions.length === 0) {
+        return res.status(403).json({
+          message: "Class session not assigned to this instructor",
+        });
+      }
+
+      const session = sessions[0];
+
+      if (session.status === "Cancelled") {
+        return res.status(400).json({
+          message: "Cannot mark attendance for a cancelled class",
+        });
+      }
+
+      if (!session.course_batch_id) {
+        return res.status(400).json({
+          message: "Class has no assigned batch",
+        });
+      }
+
+      // Verify students belong to the selected batch
+      const placeholders = studentIds.map(() => "?").join(",");
+
+      const enrollmentQuery = `
+        SELECT DISTINCT student_id
+        FROM course_enrollments
+        WHERE course_batch_id = ?
+          AND status = 'Active'
+          AND student_id IN (${placeholders})
+      `;
+
+      db.query(
+        enrollmentQuery,
+        [session.course_batch_id, ...studentIds],
+        (enrollmentErr, enrollments) => {
+          if (enrollmentErr) {
+            console.error(enrollmentErr);
+            return res.status(500).json({
+              message: "Failed to verify enrolled students",
+            });
+          }
+
+          const enrolledIds = new Set(
+            enrollments.map((row) => Number(row.student_id))
+          );
+
+          if (
+            studentIds.some((id) => !enrolledIds.has(id))
+          ) {
+            return res.status(400).json({
+              message: "Some students are not enrolled in this batch",
+            });
+          }
+
+          // Save or update existing attendance
+          const values = attendance_data.map((record) => [
+            sessionId,
+            Number(record.student_id),
+            record.status,
+            teacherId,
+          ]);
+
+          const saveQuery = `
+            INSERT INTO attendance_records
+              (class_session_id, student_id, status, marked_by)
+            VALUES ?
+            ON DUPLICATE KEY UPDATE
+              status = VALUES(status),
+              marked_by = VALUES(marked_by),
+              updated_at = CURRENT_TIMESTAMP
+          `;
+
+          db.query(saveQuery, [values], (saveErr) => {
+            if (saveErr) {
+              console.error("Save attendance error:", saveErr);
+              return res.status(500).json({
+                message: "Failed to save attendance",
+              });
+            }
+
+            res.json({
+              message: "Attendance saved successfully",
+            });
+          });
+        }
+      );
+    }
+  );
+});
+
+
+ // STUDENT - GET COURSE-WISE ATTENDANCE
+app.get("/api/student/attendance/:studentId", (req, res) => {
+  const studentId = Number(req.params.studentId);
+
+  if (!Number.isInteger(studentId) || studentId <= 0) {
+    return res.status(400).json({
+      message: "Invalid student ID"
+    });
+  }
+
+  const query = `
+    SELECT
+      c.id AS course_id,
+      c.title AS course,
+      cs.course_batch_id AS batch_id,
+      COUNT(ar.id) AS total,
+      SUM(CASE WHEN ar.status = 'Present' THEN 1 ELSE 0 END) AS present,
+      SUM(CASE WHEN ar.status = 'Absent' THEN 1 ELSE 0 END) AS absent,
+      SUM(CASE WHEN ar.status = 'Late' THEN 1 ELSE 0 END) AS late,
+      SUM(CASE WHEN ar.status = 'Excused' THEN 1 ELSE 0 END) AS excused
+    FROM attendance_records ar
+    JOIN class_schedules cs
+      ON cs.id = ar.class_session_id
+    JOIN courses c
+      ON c.id = cs.course_id
+    WHERE ar.student_id = ?
+      AND EXISTS (
+        SELECT 1
+        FROM course_enrollments ce
+        WHERE ce.student_id = ar.student_id
+          AND ce.course_batch_id = cs.course_batch_id
+          AND ce.status = 'Active'
+      )
+    GROUP BY c.id, c.title, cs.course_batch_id
+    ORDER BY c.title ASC
+  `;
+
+  db.query(query, [studentId], (err, results) => {
+    if (err) {
+      console.error("Student attendance error:", err);
+      return res.status(500).json({
+        message: "Failed to fetch student attendance"
+      });
+    }
+
+    const courses = results.map((row) => {
+      const total = Number(row.total);
+      const present = Number(row.present);
+      const absent = Number(row.absent);
+      const late = Number(row.late);
+      const excused = Number(row.excused);
+
+      return {
+        course: row.course,
+        code: `Course ${row.course_id} - Batch ${row.batch_id}`,
+        total,
+        present,
+        absent,
+        late,
+        excused,
+        percentage: total > 0
+          ? Number(((present / total) * 100).toFixed(1))
+          : 0
+      };
+    });
+
+    const totalClasses = courses.reduce(
+      (sum, course) => sum + course.total, 0
+    );
+
+    const presentCount = courses.reduce(
+      (sum, course) => sum + course.present, 0
+    );
+
+    const absentCount = courses.reduce(
+      (sum, course) => sum + course.absent, 0
+    );
+
+    const stats = {
+      totalClasses,
+      presentCount,
+      absentCount,
+      attendancePercentage: totalClasses > 0
+        ? Number(((presentCount / totalClasses) * 100).toFixed(1))
+        : 0
+    };
+
+    res.json({ courses, stats });
+  });
+});
+
+// ADMIN - GET ALL ATTENDANCE RECORDS
+app.get("/api/admin/attendance", (req, res) => {
+  const query = `
+    SELECT
+      ar.id,
+      ar.student_id AS studentId,
+      u.name AS studentName,
+      u.email AS studentEmail,
+      c.title AS course,
+      cs.course_batch_id AS batchId,
+      cs.session_date AS date,
+      cs.start_time AS startTime,
+      cs.end_time AS endTime,
+      ar.status,
+      ar.marked_by AS instructorId,
+      instructor.name AS instructorName
+    FROM attendance_records ar
+    JOIN class_schedules cs
+      ON cs.id = ar.class_session_id
+    JOIN courses c
+      ON c.id = cs.course_id
+    JOIN users u
+      ON u.id = ar.student_id
+    LEFT JOIN users instructor
+      ON instructor.id = ar.marked_by
+    ORDER BY cs.session_date DESC, ar.id DESC
+  `;
+
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error("Admin attendance error:", err);
+      return res.status(500).json({
+        message: "Failed to fetch attendance records"
+      });
+    }
+
+    res.json(results);
+  });
+});
+
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);

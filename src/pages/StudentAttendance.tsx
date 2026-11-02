@@ -20,10 +20,11 @@ type CourseAttendance = {
 function StudentAttendance() {
   const [attendance, setAttendance] = useState<CourseAttendance[]>([]);
   const [stats, setStats] = useState({
-    totalClasses: 0,
-    presentCount: 0,
-    attendancePercentage: 0
-  });
+  totalClasses: 0,
+  presentCount: 0,
+  absentCount: 0,
+  attendancePercentage: 0
+});
   const [loading, setLoading] = useState(true);
   
   const navigate = useNavigate();
@@ -43,7 +44,7 @@ function StudentAttendance() {
       const data = await res.json();
       if (res.ok) {
         setAttendance(data.courses || []);
-        setStats(data.stats || { totalClasses: 0, presentCount: 0, attendancePercentage: 0 });
+        setStats(data.stats || { totalClasses: 0, presentCount: 0, absentCount: 0, attendancePercentage: 0 });
       }
     } catch (err) {
       console.error("Error fetching attendance:", err);
@@ -52,10 +53,9 @@ function StudentAttendance() {
     }
   };
 
-  const totalClasses = stats.totalClasses;
   const totalPresent = stats.presentCount;
-  const totalAbsent = totalClasses - totalPresent;
-  const overallPercentage = stats.attendancePercentage;
+const totalAbsent = stats.absentCount;
+const overallPercentage = stats.attendancePercentage;
 
   if (loading) {
     return (
