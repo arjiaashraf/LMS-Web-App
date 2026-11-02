@@ -1397,6 +1397,197 @@ app.get('/api/admin/assignment-submissions/:assignmentId', (req, res) => {
   });
 });
 
+app.get('/api/teacher/class-schedules/:teacherId', (req, res) => {
+  const teacherId = Number(req.params.teacherId);
+
+  if (!Number.isInteger(teacherId) || teacherId <= 0) {
+    return res.status(400).json({ message: 'Invalid instructor ID' });
+  }
+
+  const query = `
+    SELECT
+      cs.*,
+      c.title AS course_title
+    FROM class_schedules cs
+    JOIN courses c ON c.id = cs.course_id
+    WHERE cs.instructor_id = ?
+    ORDER BY cs.session_date DESC, cs.start_time DESC
+  `;
+
+  db.query(query, [teacherId], (err, results) => {
+    if (err) {
+      console.error('Class schedules error:', err);
+      return res.status(500).json({
+        message: 'Failed to load class schedules'
+      });
+    }
+
+    res.json(results);
+  });
+});
+
+
+app.post('/api/teacher/class-schedule', (req, res) => {
+  const {
+    course_id,
+    course_batch_id,
+    instructor_id,
+    session_date,
+    start_time,
+    end_time,
+    time_zone,
+    meeting_link
+  } = req.body;
+
+  const courseId = Number(course_id);
+  const batchId = Number(course_batch_id);
+  const instructorId = Number(instructor_id);
+
+  if (
+    !Number.isInteger(courseId) || courseId <= 0 ||
+    !Number.isInteger(batchId) || batchId <= 0 ||
+    !Number.isInteger(instructorId) || instructorId <= 0 ||
+    !session_date || !start_time || !end_time ||
+    !meeting_link
+  ) {
+    return res.status(400).json({
+      message: 'All required class details must be provided'
+    });
+  }
+
+  if (start_time >= end_time) {
+    return res.status(400).json({
+      message: 'End time must be after start time'
+    });
+  }
+
+  try {
+    const url = new URL(meeting_link);
+    if (!['https:', 'http:'].includes(url.protocol)) {
+      throw new Error('Invalid protocol');
+    }
+  } catch {
+    return res.status(400).json({
+      message: 'Enter a valid meeting URL'
+    });
+  }
+
+  const checkQuery = `
+    SELECT cb.id
+    FROM course_batches cb
+    WHERE cb.id = ?
+      AND cb.course_id = ?
+      AND (
+        cb.instructor_id = ?
+        OR EXISTS (
+          SELECT 1
+          FROM batch_instructors bi
+          WHERE bi.batch_id = cb.id
+            AND bi.instructor_id = ?
+        )
+      )
+    LIMIT 1
+  `;
+
+  db.query(
+    checkQuery,
+    [batchId, courseId, instructorId, instructorId],
+    (err, rows) => {
+      if (err) {
+        console.error('Batch verification error:', err);
+        return res.status(500).json({
+          message: 'Failed to verify instructor batch'
+        });
+      }
+
+      if (rows.length === 0) {
+        return res.status(403).json({
+          message: 'Instructor is not assigned to this batch'
+        });
+      }
+
+      const insertQuery = `
+        INSERT INTO class_schedules
+          (course_id, course_batch_id, instructor_id,
+           session_date, start_time, end_time,
+           time_zone, meeting_link, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Scheduled')
+      `;
+
+      db.query(
+        insertQuery,
+        [
+          courseId,
+          batchId,
+          instructorId,
+          session_date,
+          start_time,
+          end_time,
+          time_zone || 'PKT',
+          meeting_link
+        ],
+        (insertErr, result) => {
+          if (insertErr) {
+            console.error('Schedule class error:', insertErr);
+            return res.status(500).json({
+              message: 'Failed to schedule online class'
+            });
+          }
+
+          res.status(201).json({
+            message: 'Online class scheduled successfully',
+            schedule_id: result.insertId
+          });
+        }
+      );
+    }
+  );
+});
+
+
+app.put('/api/teacher/class-schedule/status/:scheduleId', (req, res) => {
+  const scheduleId = Number(req.params.scheduleId);
+  const instructorId = Number(req.body.instructor_id);
+  const { status } = req.body;
+
+  const allowedStatuses = ['Scheduled', 'Completed', 'Cancelled', 'Rescheduled'];
+
+  if (
+    !Number.isInteger(scheduleId) || scheduleId <= 0 ||
+    !Number.isInteger(instructorId) || instructorId <= 0 ||
+    !allowedStatuses.includes(status)
+  ) {
+    return res.status(400).json({
+      message: 'Invalid schedule, instructor or status'
+    });
+  }
+
+  const query = `
+    UPDATE class_schedules
+    SET status = ?
+    WHERE id = ?
+      AND instructor_id = ?
+  `;
+
+  db.query(query, [status, scheduleId, instructorId], (err, result) => {
+    if (err) {
+      console.error('Class status error:', err);
+      return res.status(500).json({
+        message: 'Failed to update class status'
+      });
+    }
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({
+        message: 'Class not found for this instructor'
+      });
+    }
+
+    res.json({ message: 'Class status updated successfully' });
+  });
+});
+
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
