@@ -2086,7 +2086,7 @@ app.post('/api/teacher/exams', (req, res) => {
     !Number.isInteger(courseId) || courseId <= 0 ||
     !Number.isInteger(teacherId) || teacherId <= 0 ||
     !title?.trim() ||
-    !['Quiz', 'Midterm', 'Final', 'Assignment'].includes(exam_type) ||
+    !['Quiz', 'Midterm', 'Final'].includes(exam_type) ||
     !Number.isInteger(marks) || marks <= 0 ||
     !/^\d{4}-\d{2}-\d{2}$/.test(exam_date || '')
   ) {
@@ -5852,6 +5852,121 @@ setInterval(() => {
 setTimeout(() => {
   void processExpiredExams();
 }, 3000);
+
+
+/* =====================================================
+   INSTRUCTOR — ASSIGNMENT MARKS FOR EXAM RESULTS VIEW
+   Read-only: keeps assignment and exam records separate.
+   ===================================================== */
+
+app.get(
+  '/api/teacher/batches/:batchId/assignment-marks/:teacherId',
+  (req, res) => {
+    const batchId = Number(req.params.batchId);
+    const teacherId = Number(req.params.teacherId);
+
+    if (
+      !Number.isSafeInteger(batchId) ||
+      batchId <= 0 ||
+      !Number.isSafeInteger(teacherId) ||
+      teacherId <= 0
+    ) {
+      return res.status(400).json({
+        message: 'Invalid batch or instructor ID.'
+      });
+    }
+
+    const verifySql = `
+      SELECT
+        cb.id,
+        c.title AS course_title
+      FROM course_batches cb
+      JOIN courses c
+        ON c.id = cb.course_id
+      WHERE cb.id = ?
+        AND cb.instructor_id = ?
+      LIMIT 1
+    `;
+
+    db.query(
+      verifySql,
+      [batchId, teacherId],
+      (verifyErr, batches) => {
+        if (verifyErr) {
+          console.error('Assignment batch verification:', verifyErr);
+
+          return res.status(500).json({
+            message: 'Could not verify assignment batch.'
+          });
+        }
+
+        if (!batches.length) {
+          return res.status(403).json({
+            message: 'Instructor is not assigned to this batch.'
+          });
+        }
+
+        const query = `
+          SELECT
+            a.id AS assignment_id,
+            a.title AS assignment_title,
+            DATE_FORMAT(a.due_date, '%Y-%m-%d') AS due_date,
+            a.total_marks,
+
+            u.id AS student_id,
+            u.name AS student_name,
+            u.email AS student_email,
+
+            s.id AS submission_id,
+            s.marks_obtained,
+            s.feedback,
+
+            COALESCE(s.status, 'Pending') AS status
+
+          FROM assignments a
+
+          JOIN course_enrollments ce
+            ON ce.course_batch_id = a.course_batch_id
+           AND ce.status = 'Active'
+
+          JOIN users u
+            ON u.id = ce.student_id
+           AND u.role = 'student'
+
+          LEFT JOIN assignment_submissions s
+            ON s.id = (
+              SELECT MAX(s2.id)
+              FROM assignment_submissions s2
+              WHERE s2.assignment_id = a.id
+                AND s2.student_id = u.id
+            )
+
+          WHERE a.course_batch_id = ?
+
+          ORDER BY
+            a.due_date DESC,
+            a.id DESC,
+            u.name ASC
+        `;
+
+        db.query(query, [batchId], (err, rows) => {
+          if (err) {
+            console.error('Assignment marks loading:', err);
+
+            return res.status(500).json({
+              message: 'Failed to load assignment marks.'
+            });
+          }
+
+          return res.json({
+            course_title: batches[0].course_title,
+            assignments: rows
+          });
+        });
+      }
+    );
+  }
+);
 
 // START SERVER
 const PORT = process.env.PORT || 5000;

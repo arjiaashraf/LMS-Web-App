@@ -64,6 +64,20 @@ type StudentResult = {
   status: string;
 };
 
+type AssignmentMark = {
+  assignment_id: number;
+  assignment_title: string;
+  due_date: string;
+  total_marks: number;
+  student_id: number;
+  student_name: string;
+  student_email: string;
+  submission_id: number | null;
+  marks_obtained: number | string | null;
+  feedback: string | null;
+  status: string;
+};
+
 type QuestionType = "MCQ" | "TrueFalse" | "ShortAnswer";
 
 type ExamQuestion = {
@@ -120,6 +134,7 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
     useState<StudentResult[]>([]);
 
   const [showModal, setShowModal] = useState(false);
+  const [showMarksSelector, setShowMarksSelector] = useState(false);
   const [loadingResults, setLoadingResults] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [savingFeedbackId, setSavingFeedbackId] = useState<number | null>(null);
@@ -177,6 +192,15 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
 
   const [publishingExamId, setPublishingExamId] =
     useState<number | null>(null);
+
+  const [assignmentMarks, setAssignmentMarks] =
+  useState<AssignmentMark[]>([]);
+
+const [loadingAssignmentMarks, setLoadingAssignmentMarks] =
+  useState(false);
+
+const [assignmentMarksError, setAssignmentMarksError] =
+  useState("");
 
   // ========== AUTHENTICATION ==========
 
@@ -283,11 +307,53 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
       setCreatingExam(false);
     }
   };
+  
+
+  
+const fetchAssignmentMarks = async (batchId?: number) => {
+  if (!batchId) {
+    setAssignmentMarks([]);
+    return;
+  }
+
+  setLoadingAssignmentMarks(true);
+  setAssignmentMarksError("");
+
+  try {
+    const response = await fetch(
+      `${API_BASE}/api/teacher/batches/${batchId}/assignment-marks/${teacherId}`
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(
+        data.message || "Failed to load assignment marks."
+      );
+    }
+
+    setAssignmentMarks(
+      Array.isArray(data.assignments)
+        ? data.assignments
+        : []
+    );
+  } catch (error) {
+    setAssignmentMarks([]);
+
+    setAssignmentMarksError(
+      error instanceof Error
+        ? error.message
+        : "Unable to load assignment marks."
+    );
+  } finally {
+    setLoadingAssignmentMarks(false);
+  }
+};
 
   // ========== FETCH GRADING STUDENTS ==========
-
-  const handleSelectExam = async (exam: Exam) => {
+    const handleSelectExam = async (exam: Exam) => {
     setSelectedExam(exam);
+    void fetchAssignmentMarks(exam.course_batch_id);
     setStudentResults([]);
     setLoadingResults(true);
 
@@ -930,17 +996,27 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
         </div>
 
         {!selectedExam && (
-          <button
-            type="button"
-            onClick={() => {
-              setExamError("");
-              setShowModal(true);
-            }}
-            className="flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2.5 rounded-lg font-medium transition"
-          >
-            <Plus size={18} />
-            Create New Exam
-          </button>
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => setShowMarksSelector(true)}
+              className="flex items-center justify-center gap-2 bg-purple-50 hover:bg-purple-100 text-purple-700 border border-purple-200 px-4 py-2.5 rounded-lg font-semibold transition"
+            >
+              <ClipboardList size={18} />
+              Manage Marks &amp; Results
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setExamError("");
+                setShowModal(true);
+              }}
+              className="flex items-center justify-center gap-2 bg-purple-600 hover:bg-purple-700 text-white px-4 py-2.5 rounded-lg font-medium transition"
+            >
+              <Plus size={18} />
+              Create New Exam
+            </button>
+          </div>
         )}
       </div>
 
@@ -1119,18 +1195,7 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
                     Manage Questions
                   </button>
 
-                  {/* MANAGE MARKS */}
 
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleSelectExam(exam)
-                    }
-                    className="w-full bg-purple-50 hover:bg-purple-100 text-purple-700 py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2"
-                  >
-                    <ClipboardList size={17} />
-                    Manage Marks & Results
-                  </button>
                   
 {/* REVIEW STUDENT SUBMISSIONS */}
 
@@ -1213,9 +1278,14 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
                       </th>
                       <th className="p-3">Grade</th>
                       <th className="p-3">Feedback</th>
+                      {selectedExam.exam_mode === "Online" && (
+                        <th className="p-3">Action</th>
+                      )}
                       <th className="p-3">Status</th>
                     </tr>
                   </thead>
+
+
 
                   <tbody className="divide-y text-slate-700">
                     {studentResults.map((student) => (
@@ -1320,6 +1390,93 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
                 </table>
               </div>
 
+              {/* ========== ASSIGNMENT MARKS (READ ONLY) ========== */}
+
+<section className="mt-8 border-t pt-6 space-y-4">
+  <div>
+    <h3 className="text-lg font-bold text-slate-800">
+      Assignment Marks & Results
+    </h3>
+
+    <p className="text-sm text-slate-500 mt-1">
+      Assignment grades from the same course batch.
+      Marks are managed in the Assignments module.
+    </p>
+  </div>
+
+  {loadingAssignmentMarks ? (
+    <p className="text-sm text-slate-500">
+      Loading assignment results...
+    </p>
+  ) : assignmentMarksError ? (
+    <p className="text-sm text-red-600">
+      {assignmentMarksError}
+    </p>
+  ) : assignmentMarks.length === 0 ? (
+    <p className="text-sm text-slate-500">
+      No assignments found for this batch.
+    </p>
+  ) : (
+    <div className="overflow-x-auto rounded-lg border">
+      <table className="w-full text-left text-sm">
+        <thead className="bg-slate-50 text-slate-600">
+          <tr>
+            <th className="p-3">Assignment</th>
+            <th className="p-3">Student</th>
+            <th className="p-3">Marks</th>
+            <th className="p-3">Feedback</th>
+            <th className="p-3">Status</th>
+          </tr>
+        </thead>
+
+        <tbody className="divide-y">
+          {assignmentMarks.map((item) => (
+            <tr
+              key={`${item.assignment_id}-${item.student_id}`}
+              className="hover:bg-slate-50"
+            >
+              <td className="p-3 font-medium">
+                {item.assignment_title}
+              </td>
+
+              <td className="p-3">
+                {item.student_name}
+              </td>
+
+              <td className="p-3">
+                {item.status === "Graded" &&
+                item.marks_obtained !== null
+                  ? `${item.marks_obtained} / ${item.total_marks}`
+                  : "—"}
+              </td>
+
+              <td className="p-3 text-slate-600">
+                {item.status === "Graded"
+                  ? item.feedback || "—"
+                  : "—"}
+              </td>
+
+              <td className="p-3">
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                    item.status === "Graded"
+                      ? "bg-green-100 text-green-700"
+                      : item.status === "Submitted"
+                        ? "bg-blue-100 text-blue-700"
+                        : "bg-amber-100 text-amber-700"
+                  }`}
+                >
+                  {item.status}
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )}
+</section>
+
               <div className="flex justify-end pt-4 border-t">
                 {selectedExam.exam_mode === "Offline" ? (
                   <button
@@ -1357,6 +1514,60 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ========== GLOBAL MARKS & RESULTS SELECTOR ========== */}
+      {showMarksSelector && !selectedExam && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[85vh] overflow-y-auto p-6">
+            <div className="flex items-start justify-between gap-3 border-b pb-4 mb-5">
+              <div>
+                <h2 className="text-xl font-bold text-slate-800">Manage Marks &amp; Results</h2>
+                <p className="text-sm text-slate-500 mt-1">
+                  Choose an exam to view its results and the course batch assignment marks.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close marks selector"
+                onClick={() => setShowMarksSelector(false)}
+                className="p-1 text-slate-500 hover:text-slate-800"
+              >
+                <X size={22} />
+              </button>
+            </div>
+            {exams.length === 0 ? (
+              <p className="text-center text-slate-500 py-8">No exams available.</p>
+            ) : (
+              <div className="space-y-3">
+                {exams.map((exam) => (
+                  <button
+                    key={exam.id}
+                    type="button"
+                    onClick={() => {
+                      setShowMarksSelector(false);
+                      void handleSelectExam(exam);
+                    }}
+                    className="w-full text-left rounded-lg border border-slate-200 p-4 hover:border-purple-500 hover:bg-purple-50 transition"
+                  >
+                    <div className="flex justify-between items-center gap-3">
+                      <div>
+                        <p className="font-semibold text-slate-800">{exam.title}</p>
+                        <p className="text-sm text-slate-500 mt-1">{exam.course_title}</p>
+                      </div>
+                      <span className="text-xs bg-purple-100 text-purple-700 px-3 py-1 rounded-full">
+                        {exam.exam_type}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-3">
+                      Total Marks: {exam.total_marks} · {exam.exam_mode}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -2080,9 +2291,6 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
                     <option value="Quiz">Quiz</option>
                     <option value="Midterm">Midterm</option>
                     <option value="Final">Final</option>
-                    <option value="Assignment">
-                      Assignment
-                    </option>
                   </select>
                 </div>
 
