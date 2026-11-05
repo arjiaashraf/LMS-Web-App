@@ -9,7 +9,7 @@ import {
   Settings,
   LogOut,
   Menu,
-  Video, // <--- Yeh icon add karein
+  Video,
   BarChart3,
   X,
   CheckCircle,
@@ -23,19 +23,29 @@ function AdminDashboard() {
   const navigate = useNavigate();
 
   const [mobileMenu, setMobileMenu] = useState(false);
-  const [pendingUsers, setPendingUsers] = useState<any[]>([]);
+  const [pendingUsers, setPendingUsers] = useState<Array<{ id: number; name: string; email: string; role: string; status: string }>>([]);
+  const [loadingStats, setLoadingStats] = useState(true);
+  const [statsError, setStatsError] = useState("");
   
   // Stats state for real database counts
   const [stats, setStats] = useState({
     totalStudents: 0,
     totalTeachers: 0,
-    pendingUsers: 0
+    pendingUsers: 0,
+    activeCourses: 0
   });
 
   // Session Protection: Check if admin is logged in
   useEffect(() => {
     const user = localStorage.getItem("user");
     if (!user) {
+      navigate("/login");
+      return;
+    }
+    try {
+      const session = JSON.parse(user);
+      if (session.role !== "admin") navigate("/login");
+    } catch {
       navigate("/login");
     }
   }, [navigate]);
@@ -45,7 +55,7 @@ function AdminDashboard() {
     try {
       const response = await fetch("http://localhost:5000/api/admin/pending-users");
       const data = await response.json();
-      if (response.ok) {
+      if (response.ok && Array.isArray(data)) {
         setPendingUsers(data);
       }
     } catch (error) {
@@ -58,17 +68,30 @@ function AdminDashboard() {
     try {
       const response = await fetch("http://localhost:5000/api/admin/stats");
       const data = await response.json();
-      if (response.ok) {
-        setStats(data);
-      }
+      if (!response.ok) throw new Error(data.message || "Could not load statistics");
+      setStats({
+        totalStudents: Number(data.totalStudents ?? 0),
+        totalTeachers: Number(data.totalTeachers ?? 0),
+        pendingUsers: Number(data.pendingUsers ?? 0),
+        activeCourses: Number(data.activeCourses ?? 0),
+      });
+      setStatsError("");
     } catch (error) {
       console.error("Error fetching dashboard stats:", error);
+      setStatsError("Unable to refresh dashboard statistics. Please check the server.");
+    } finally {
+      setLoadingStats(false);
     }
   };
 
   useEffect(() => {
-    fetchPendingUsers();
-    fetchStats();
+    void fetchPendingUsers();
+    void fetchStats();
+    const interval = window.setInterval(() => {
+      void fetchPendingUsers();
+      void fetchStats();
+    }, 60000);
+    return () => window.clearInterval(interval);
   }, []);
 
   // Approve User Function
@@ -99,7 +122,7 @@ function AdminDashboard() {
     { name: "Assignments", path: "/assignments", icon: ClipboardList },
     { name: "Attendance", path: "/attendance", icon: CalendarCheck },
     { name: "Exams & Results", path: "/exams", icon: FileText },
-    { name: "Online Classes", path: "/announcements", icon: Video }, // <--- Yeh change karein
+    { name: "Online Classes", path: "/announcements", icon: Video },
     { name: "Reports", path: "/reports", icon: BarChart3 },
     { name: "Settings", path: "/settings", icon: Settings },
   ];
@@ -116,15 +139,19 @@ function AdminDashboard() {
     <div className="min-h-screen bg-slate-100 flex">
       {/* SIDEBAR */}
       <aside className="hidden md:flex w-64 bg-slate-900 text-white flex-col fixed left-0 top-0 bottom-0">
-        <div className="h-20 flex items-center px-6 border-b border-slate-700">
-          <div className="bg-blue-600 p-2 rounded-lg">
-            <GraduationCap size={25} />
-          </div>
-          <div className="ml-3">
-            <h1 className="text-xl font-bold">LMS</h1>
-            <p className="text-xs text-slate-400">Management System</p>
-          </div>
-        </div>
+        
+{/* CAMPUS 95 BRANDING */}
+
+<div className="h-24 shrink-0 flex items-center justify-center px-5 border-b border-slate-700">
+  <div className="w-full max-w-[210px] h-[70px] bg-white rounded-xl flex items-center justify-center px-3 shadow-sm">
+    <img
+      src="/campus95-logo.png"
+      alt="Campus 95 - Success Ahead"
+      className="w-full h-full object-contain"
+    />
+  </div>
+</div>
+
 
         <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
           {navigation.map((item) => {
@@ -308,13 +335,17 @@ function AdminDashboard() {
             </div>
           </div>
 
+          {statsError && (
+            <p role="alert" className="mb-4 rounded-lg bg-red-50 border border-red-200 text-red-700 p-3 text-sm">{statsError}</p>
+          )}
+
           {/* STATISTICS (Connected to Database Real Data) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
             <div className="bg-white rounded-xl p-6 shadow-sm">
               <div className="flex justify-between items-start">
                 <div>
                   <p className="text-sm text-slate-500">Total Students</p>
-                  <h2 className="text-3xl font-bold text-slate-800 mt-2">{stats.totalStudents}</h2>
+                  <h2 className="text-3xl font-bold text-slate-800 mt-2">{loadingStats ? "..." : stats.totalStudents}</h2>
                   <p className="text-sm text-green-600 mt-2">Active database count</p>
                 </div>
                 <div className="bg-blue-100 text-blue-600 p-3 rounded-lg">
@@ -327,7 +358,7 @@ function AdminDashboard() {
               <div className="flex justify-between items-start">
                 <div>
                   <p className="text-sm text-slate-500">Teachers</p>
-                  <h2 className="text-3xl font-bold text-slate-800 mt-2">{stats.totalTeachers}</h2>
+                  <h2 className="text-3xl font-bold text-slate-800 mt-2">{loadingStats ? "..." : stats.totalTeachers}</h2>
                   <p className="text-sm text-green-600 mt-2">Active database count</p>
                 </div>
                 <div className="bg-purple-100 text-purple-600 p-3 rounded-lg">
@@ -340,8 +371,8 @@ function AdminDashboard() {
               <div className="flex justify-between items-start">
                 <div>
                   <p className="text-sm text-slate-500">Active Courses</p>
-                  <h2 className="text-3xl font-bold text-slate-800 mt-2">42</h2>
-                  <p className="text-sm text-blue-600 mt-2">6 new courses</p>
+                  <h2 className="text-3xl font-bold text-slate-800 mt-2">{loadingStats ? "..." : stats.activeCourses}</h2>
+                  <p className="text-sm text-blue-600 mt-2">Published courses in database</p>
                 </div>
                 <div className="bg-green-100 text-green-600 p-3 rounded-lg">
                   <BookOpen size={23} />
@@ -353,7 +384,7 @@ function AdminDashboard() {
               <div className="flex justify-between items-start">
                 <div>
                   <p className="text-sm text-slate-500">Pending Approvals</p>
-                  <h2 className="text-3xl font-bold text-slate-800 mt-2">{stats.pendingUsers}</h2>
+                  <h2 className="text-3xl font-bold text-slate-800 mt-2">{loadingStats ? "..." : stats.pendingUsers}</h2>
                   <p className="text-sm text-orange-600 mt-2">Needs attention</p>
                 </div>
                 <div className="bg-orange-100 text-orange-600 p-3 rounded-lg">

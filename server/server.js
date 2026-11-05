@@ -180,24 +180,56 @@ app.put('/api/admin/approve-user/:id', (req, res) => {
   });
 });
 
+
+/* ========== ADMIN DASHBOARD REAL STATISTICS ========== */
+
 app.get('/api/admin/stats', (req, res) => {
   const query = `
-    SELECT 
-      (SELECT COUNT(*) FROM users WHERE role = 'student' AND status = 'approved') as totalStudents,
-      (SELECT COUNT(*) FROM users WHERE role = 'instructor' AND status = 'approved') as totalTeachers,
-      (SELECT COUNT(*) FROM users WHERE status = 'pending') as pendingUsers
-  `;
-  db.query(query, (err, results) => {
-    if (err) return res.status(500).json({ message: "Database error", error: err });
-    res.json(results[0]);
-  });
-});
+    SELECT
 
-app.delete('/api/admin/delete-user/:id', (req, res) => {
-  const userId = req.params.id;
-  db.query("DELETE FROM users WHERE id = ?", [userId], (err, result) => {
-    if (err) return res.status(500).json({ message: "Database error", error: err });
-    res.json({ message: "User deleted successfully from database!" });
+      (
+        SELECT COUNT(*)
+        FROM users
+        WHERE role = 'student'
+          AND status = 'approved'
+      ) AS totalStudents,
+
+      (
+        SELECT COUNT(*)
+        FROM users
+        WHERE role = 'instructor'
+          AND status = 'approved'
+      ) AS totalTeachers,
+
+      (
+        SELECT COUNT(*)
+        FROM courses
+        WHERE status = 'Published'
+      ) AS activeCourses,
+
+      (
+        SELECT COUNT(*)
+        FROM users
+        WHERE status = 'pending'
+          AND role IN ('student', 'instructor')
+      ) AS pendingUsers
+  `;
+
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error('Admin dashboard stats error:', err);
+
+      return res.status(500).json({
+        message: 'Failed to load admin statistics.'
+      });
+    }
+
+    return res.json({
+      totalStudents: Number(results[0].totalStudents),
+      totalTeachers: Number(results[0].totalTeachers),
+      activeCourses: Number(results[0].activeCourses),
+      pendingUsers: Number(results[0].pendingUsers)
+    });
   });
 });
 
@@ -223,6 +255,270 @@ app.get('/api/teachers', (req, res) => {
     }));
     res.json(formattedTeachers);
   });
+});
+
+// ========== INSTRUCTOR DASHBOARD API ==========
+
+// YAHAN NEW DASHBOARD API PASTE KAREIN
+
+/* =========================================================
+   INSTRUCTOR DASHBOARD — REAL MYSQL DATA
+   GET /api/teacher/dashboard/:teacherId
+   ========================================================= */
+
+app.get('/api/teacher/dashboard/:teacherId', async (req, res) => {
+  const teacherId = Number(req.params.teacherId);
+
+  if (!Number.isSafeInteger(teacherId) || teacherId <= 0) {
+    return res.status(400).json({
+      message: 'Invalid instructor ID.'
+    });
+  }
+
+  const runQuery = (sql, params = []) =>
+    new Promise((resolve, reject) => {
+      db.query(sql, params, (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    });
+
+  // Includes the primary instructor and other assigned instructors.
+  const assignedBatchCondition = `
+    (
+      cb.instructor_id = ?
+      OR EXISTS (
+        SELECT 1
+        FROM batch_instructors bi
+        WHERE bi.batch_id = cb.id
+          AND bi.instructor_id = ?
+      )
+    )
+  `;
+
+  try {
+    const instructors = await runQuery(
+      `SELECT id
+       FROM users
+       WHERE id = ? AND role = 'instructor'
+       LIMIT 1`,
+      [teacherId]
+    );
+
+    if (instructors.length === 0) {
+      return res.status(404).json({
+        message: 'Instructor not found.'
+      });
+    }
+
+    const [
+      courses,
+      students,
+      pendingReviews,
+      exams,
+      classes,
+      submissions
+    ] = await Promise.all([
+
+      // 1. Assigned courses
+      runQuery(
+        `
+        SELECT COUNT(DISTINCT cb.course_id) AS total
+        FROM course_batches cb
+        WHERE ${assignedBatchCondition}
+        `,
+        [teacherId, teacherId]
+      ),
+
+      // 2. Active enrolled students
+      runQuery(
+        `
+        SELECT COUNT(DISTINCT ce.student_id) AS total
+        FROM course_batches cb
+
+        JOIN course_enrollments ce
+          ON ce.course_batch_id = cb.id
+         AND ce.status = 'Active'
+
+        WHERE ${assignedBatchCondition}
+        `,
+        [teacherId, teacherId]
+      ),
+
+      // 3. Assignment submissions awaiting grading
+      runQuery(
+        `
+        SELECT COUNT(DISTINCT s.id) AS total
+        FROM assignment_submissions s
+
+        JOIN assignments a
+          ON a.id = s.assignment_id
+
+        JOIN course_batches cb
+          ON cb.id = a.course_batch_id
+
+        JOIN course_enrollments ce
+          ON ce.course_batch_id = cb.id
+         AND ce.student_id = s.student_id
+         AND ce.status = 'Active'
+
+        WHERE ${assignedBatchCondition}
+          AND s.status = 'Submitted'
+        `,
+        [teacherId, teacherId]
+      ),
+
+      // 4. Created exams
+      runQuery(
+        `
+        SELECT COUNT(DISTINCT e.id) AS total
+        FROM exams e
+
+        JOIN course_batches cb
+          ON cb.id = e.course_batch_id
+
+        WHERE e.teacher_id = ?
+          AND ${assignedBatchCondition}
+        `,
+        [teacherId, teacherId, teacherId]
+      ),
+
+      // 5. Upcoming online classes
+      runQuery(
+        `
+        SELECT
+          cs.id,
+          c.title AS course_title,
+          DATE_FORMAT(
+            cs.session_date,
+            '%Y-%m-%d'
+          ) AS session_date,
+          TIME_FORMAT(
+            cs.start_time,
+            '%H:%i:%s'
+          ) AS start_time,
+          cs.status
+
+        FROM class_schedules cs
+
+        JOIN course_batches cb
+          ON cb.id = cs.course_batch_id
+
+        JOIN courses c
+          ON c.id = cb.course_id
+
+        WHERE cs.instructor_id = ?
+          AND ${assignedBatchCondition}
+          AND TIMESTAMP(
+            cs.session_date,
+            cs.start_time
+          ) > NOW()
+          AND cs.status = 'Scheduled'
+
+        ORDER BY
+          cs.session_date ASC,
+          cs.start_time ASC
+
+        LIMIT 5
+        `,
+        [teacherId, teacherId, teacherId]
+      ),
+
+      // 6. Latest assignment submissions
+      runQuery(
+        `
+        SELECT
+          s.id AS submission_id,
+          u.name AS student_name,
+          a.title AS assignment_title,
+          c.title AS course_title,
+          s.status,
+          DATE_FORMAT(
+            s.submitted_at,
+            '%Y-%m-%d %H:%i:%s'
+          ) AS submitted_at
+
+        FROM assignment_submissions s
+
+        JOIN assignments a
+          ON a.id = s.assignment_id
+
+        JOIN course_batches cb
+          ON cb.id = a.course_batch_id
+
+        JOIN courses c
+          ON c.id = cb.course_id
+
+        JOIN users u
+          ON u.id = s.student_id
+
+        JOIN course_enrollments ce
+          ON ce.course_batch_id = cb.id
+         AND ce.student_id = s.student_id
+         AND ce.status = 'Active'
+
+        WHERE ${assignedBatchCondition}
+
+        ORDER BY
+          s.submitted_at DESC,
+          s.id DESC
+
+        LIMIT 5
+        `,
+        [teacherId, teacherId]
+      )
+    ]);
+
+    return res.json({
+      assignedCoursesCount:
+        Number(courses[0]?.total || 0),
+
+      activeStudentsCount:
+        Number(students[0]?.total || 0),
+
+      pendingAssignmentReviewsCount:
+        Number(pendingReviews[0]?.total || 0),
+
+      totalExamsCount:
+        Number(exams[0]?.total || 0),
+
+      upcomingClasses: classes,
+      recentSubmissions: submissions
+    });
+
+  } catch (error) {
+    console.error(
+      'Instructor dashboard API error:',
+      error
+    );
+
+    return res.status(500).json({
+      message: 'Failed to load instructor dashboard.'
+    });
+  }
+});
+
+
+
+// ========== EXISTING TEACHER PROFILE API ==========
+// ISKO BILKUL CHANGE NAHI KARNA
+
+app.get('/api/teacher/:id', (req, res) => {
+  const teacherId = req.params.id;
+
+  db.query(
+    "SELECT id, name, email, phone, qualification, specialisation, department, profile_photo, role, status FROM users WHERE id = ? AND role = 'instructor'",
+    [teacherId],
+    (err, results) => {
+      if (err || results.length === 0) {
+        return res.status(404).json({
+          message: "Teacher not found"
+        });
+      }
+
+      res.json(results[0]);
+    }
+  );
 });
 
 app.get('/api/teacher/:id', (req, res) => {
@@ -470,21 +766,252 @@ app.put('/api/admin/update-student/:id', (req, res) => {
   });
 });
 
-app.get('/api/student/dashboard/:id', (req, res) => {
-  const studentId = req.params.id;
-  db.query("SELECT id, name, email, role, status FROM users WHERE id = ? AND role = 'student'", [studentId], (err, studentResults) => {
-    if (err || studentResults.length === 0) return res.status(404).json({ message: "Student not found" });
-    res.json({
-      id: studentResults[0].id,
-      name: studentResults[0].name,
-      email: studentResults[0].email,
-      enrolledCoursesCount: 4,
-      pendingAssignmentsCount: 2,
-      attendancePercentage: "94%",
-      gpa: "3.75"
+
+/* ========== STUDENT DASHBOARD — REAL DATABASE DATA ========== */
+
+app.get('/api/student/dashboard/:id', async (req, res) => {
+  const studentId = Number(req.params.id);
+
+  if (!Number.isSafeInteger(studentId) || studentId <= 0) {
+    return res.status(400).json({
+      message: 'Invalid student ID.'
     });
-  });
+  }
+
+  const query = (sql, params = []) =>
+    new Promise((resolve, reject) => {
+      db.query(sql, params, (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      });
+    });
+
+  try {
+    // Student profile
+    const students = await query(
+      `SELECT id, name, email, cgpa
+       FROM users
+       WHERE id = ? AND role = 'student'
+       LIMIT 1`,
+      [studentId]
+    );
+
+    if (!students.length) {
+      return res.status(404).json({
+        message: 'Student not found.'
+      });
+    }
+
+    const [
+      courseRows,
+      assignmentRows,
+      attendanceRows,
+      upcomingAssignments,
+      upcomingExams
+    ] = await Promise.all([
+
+      // 1. Active enrolled courses
+      query(
+        `SELECT COUNT(DISTINCT cb.course_id) AS total
+         FROM course_enrollments ce
+         JOIN course_batches cb
+           ON cb.id = ce.course_batch_id
+         WHERE ce.student_id = ?
+           AND ce.status = 'Active'`,
+        [studentId]
+      ),
+
+      // 2. Pending assignments
+      query(
+        `SELECT COUNT(*) AS total
+         FROM assignments a
+         WHERE EXISTS (
+           SELECT 1
+           FROM course_enrollments ce
+           WHERE ce.course_batch_id = a.course_batch_id
+             AND ce.student_id = ?
+             AND ce.status = 'Active'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM assignment_submissions s
+           WHERE s.assignment_id = a.id
+             AND s.student_id = ?
+             AND s.status IN ('Submitted', 'Graded')
+         )`,
+        [studentId, studentId]
+      ),
+
+      // 3. Recorded attendance
+      query(
+        `SELECT
+           COUNT(*) AS total,
+           COALESCE(
+             SUM(
+               CASE WHEN ar.status = 'Present'
+               THEN 1 ELSE 0 END
+             ), 0
+           ) AS present
+         FROM attendance_records ar
+         JOIN class_schedules cs
+           ON cs.id = ar.class_session_id
+         WHERE ar.student_id = ?
+           AND EXISTS (
+             SELECT 1
+             FROM course_enrollments ce
+             WHERE ce.student_id = ar.student_id
+               AND ce.course_batch_id = cs.course_batch_id
+               AND ce.status = 'Active'
+           )`,
+        [studentId]
+      ),
+
+      // 4. Upcoming unsubmitted assignments
+      query(
+        `SELECT
+           a.id,
+           a.title,
+           c.title AS course_title,
+           DATE_FORMAT(
+             a.due_date, '%Y-%m-%d'
+           ) AS due_date
+         FROM assignments a
+         JOIN course_batches cb
+           ON cb.id = a.course_batch_id
+         JOIN courses c
+           ON c.id = cb.course_id
+         WHERE a.due_date >= CURDATE()
+           AND EXISTS (
+             SELECT 1
+             FROM course_enrollments ce
+             WHERE ce.course_batch_id = a.course_batch_id
+               AND ce.student_id = ?
+               AND ce.status = 'Active'
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM assignment_submissions s
+             WHERE s.assignment_id = a.id
+               AND s.student_id = ?
+               AND s.status IN ('Submitted', 'Graded')
+           )
+         ORDER BY a.due_date ASC, a.id ASC
+         LIMIT 5`,
+        [studentId, studentId]
+      ),
+
+      // 5. Upcoming online exams, including individual extensions
+      query(
+        `SELECT
+           e.id,
+           e.title,
+           c.title AS course_title,
+
+           DATE_FORMAT(
+             COALESCE(
+               x.start_at,
+               TIMESTAMP(e.exam_date, e.start_time)
+             ),
+             '%Y-%m-%d'
+           ) AS exam_date,
+
+           DATE_FORMAT(
+             COALESCE(
+               x.start_at,
+               TIMESTAMP(e.exam_date, e.start_time)
+             ),
+             '%H:%i:%s'
+           ) AS exam_start_time
+
+         FROM exams e
+
+         JOIN course_batches cb
+           ON cb.id = e.course_batch_id
+
+         JOIN courses c
+           ON c.id = cb.course_id
+
+         JOIN course_enrollments ce
+           ON ce.course_batch_id = cb.id
+          AND ce.student_id = ?
+          AND ce.status = 'Active'
+
+         LEFT JOIN student_exam_extensions x
+           ON x.exam_id = e.id
+          AND x.student_id = ce.student_id
+
+         WHERE e.exam_status = 'Published'
+           AND e.exam_mode = 'Online'
+           AND e.result_published = 0
+
+           AND COALESCE(
+             x.start_at,
+             TIMESTAMP(e.exam_date, e.start_time)
+           ) > NOW()
+
+         ORDER BY
+           COALESCE(
+             x.start_at,
+             TIMESTAMP(e.exam_date, e.start_time)
+           ) ASC,
+           e.id ASC
+
+         LIMIT 5`,
+        [studentId]
+      )
+    ]);
+
+    const attendanceTotal =
+      Number(attendanceRows[0]?.total || 0);
+
+    const attendancePresent =
+      Number(attendanceRows[0]?.present || 0);
+
+    const rawCgpa = students[0].cgpa;
+
+    const validCgpa =
+      rawCgpa !== null &&
+      rawCgpa !== undefined &&
+      String(rawCgpa).trim() !== '' &&
+      Number.isFinite(Number(rawCgpa)) &&
+      Number(rawCgpa) >= 0 &&
+      Number(rawCgpa) <= 4;
+
+    return res.json({
+      id: students[0].id,
+      name: students[0].name,
+      email: students[0].email,
+
+      enrolledCoursesCount:
+        Number(courseRows[0]?.total || 0),
+
+      pendingAssignmentsCount:
+        Number(assignmentRows[0]?.total || 0),
+
+      attendancePercentage:
+        attendanceTotal > 0
+          ? `${(
+              attendancePresent / attendanceTotal * 100
+            ).toFixed(1)}%`
+          : null,
+
+      cgpa: validCgpa
+        ? Number(rawCgpa).toFixed(2)
+        : null,
+
+      upcomingAssignments,
+      upcomingExams
+    });
+
+  } catch (err) {
+    console.error('Student dashboard real data error:', err);
+
+    return res.status(500).json({
+      message: 'Failed to load student dashboard.'
+    });
+  }
 });
+
 
 
 // ================= COURSES & BATCHES AUTHORITATIVE MODULE APIs =================
@@ -3708,143 +4235,547 @@ app.get(
 
 
 
-/* ========== INSTRUCTOR: GRADE SHORT ANSWER ========== */
+/* ==========================================================
+   INSTRUCTOR — GRADE SHORT ANSWER (UPDATED)
+   - Save question marks
+   - Recalculate attempt score
+   - Calculate grade automatically
+   - Sync latest attempt to exam_results
+   - Preserve published results
+   - Prevent old retakes overwriting newer attempts
+   ========================================================== */
 
-app.put('/api/teacher/exam-attempts/:attemptId/grade-answer', (req, res) => {
-  const attemptId = Number(req.params.attemptId);
-  const teacherId = Number(req.body?.teacher_id);
-  const questionId = Number(req.body?.question_id);
-  const rawMarks = req.body?.marks_awarded;
-  const awarded = Number(rawMarks);
+app.put(
+  '/api/teacher/exam-attempts/:attemptId/grade-answer',
+  (req, res) => {
 
-  if (
-    !Number.isSafeInteger(attemptId) || attemptId <= 0 ||
-    !Number.isSafeInteger(teacherId) || teacherId <= 0 ||
-    !Number.isSafeInteger(questionId) || questionId <= 0 ||
-    rawMarks === null || rawMarks === undefined || rawMarks === '' ||
-    !Number.isFinite(awarded) || awarded < 0
-  ) {
-    return res.status(400).json({ message: 'Invalid grading information.' });
-  }
+    const attemptId = Number(req.params.attemptId);
+    const teacherId = Number(req.body?.teacher_id);
+    const questionId = Number(req.body?.question_id);
 
-  db.beginTransaction((beginErr) => {
-    if (beginErr) {
-      return res.status(500).json({ message: 'Could not begin grading.' });
+    const rawMarks = req.body?.marks_awarded;
+    const awarded = Number(rawMarks);
+
+    // ========== VALIDATE INPUT ==========
+
+    if (
+      !Number.isSafeInteger(attemptId) ||
+      attemptId <= 0 ||
+      !Number.isSafeInteger(teacherId) ||
+      teacherId <= 0 ||
+      !Number.isSafeInteger(questionId) ||
+      questionId <= 0 ||
+      rawMarks === null ||
+      rawMarks === undefined ||
+      rawMarks === '' ||
+      !Number.isFinite(awarded) ||
+      awarded < 0
+    ) {
+      return res.status(400).json({
+        message: 'Invalid grading information.'
+      });
     }
 
-    const fail = (code, message) => {
-      db.rollback(() => res.status(code).json({ message }));
+    // ========== CALCULATE GRADE ==========
+
+    const calculateExamGrade = (obtained, maximum) => {
+
+      const total = Number(maximum);
+      const marks = Number(obtained);
+
+      if (
+        !Number.isFinite(total) ||
+        !Number.isFinite(marks) ||
+        total <= 0
+      ) {
+        return null;
+      }
+
+      const percentage = (marks / total) * 100;
+
+      if (percentage >= 90) return 'A+';
+      if (percentage >= 80) return 'A';
+      if (percentage >= 70) return 'B';
+      if (percentage >= 60) return 'C';
+      if (percentage >= 50) return 'D';
+
+      return 'F';
     };
 
-    const verifySql = `
-      SELECT a.id, a.exam_id, a.student_id, a.status,
-             e.result_published, q.marks, ans.id AS answer_id
-      FROM exam_attempts a
-      JOIN exams e ON e.id = a.exam_id
-      JOIN exam_questions q ON q.exam_id = a.exam_id
-        AND q.id = ? AND q.question_type = 'ShortAnswer'
-      JOIN exam_answers ans ON ans.attempt_id = a.id
-        AND ans.question_id = q.id
-      WHERE a.id = ? AND e.teacher_id = ?
-        AND a.status IN ('PendingReview', 'Graded')
-        AND TRIM(COALESCE(ans.answer_text, '')) <> ''
-      FOR UPDATE
-    `;
+    // ========== BEGIN TRANSACTION ==========
 
-    db.query(verifySql, [questionId, attemptId, teacherId], (verifyErr, rows) => {
-      if (verifyErr) return fail(500, 'Failed to verify answer.');
-      if (!rows.length) return fail(404, 'Reviewable short answer not found.');
+    db.beginTransaction((beginErr) => {
 
-      const row = rows[0];
+      if (beginErr) {
+        console.error('Grading transaction error:', beginErr);
 
-      if (Number(row.result_published) === 1) {
-        return fail(409, 'Published results cannot be changed here.');
+        return res.status(500).json({
+          message: 'Could not begin grading.'
+        });
       }
 
-      if (awarded > Number(row.marks)) {
-        return fail(400, `Marks cannot exceed ${row.marks}.`);
-      }
+      const fail = (code, message) => {
+        db.rollback(() => {
+          return res.status(code).json({ message });
+        });
+      };
+
+      // ========== VERIFY ANSWER AND OWNERSHIP ==========
+
+      const verifySql = `
+        SELECT
+          a.id,
+          a.exam_id,
+          a.student_id,
+          a.status,
+
+          e.result_published,
+          e.total_marks AS exam_total_marks,
+
+          q.marks AS question_marks,
+
+          ans.id AS answer_id
+
+        FROM exam_attempts a
+
+        JOIN exams e
+          ON e.id = a.exam_id
+
+        JOIN exam_questions q
+          ON q.exam_id = a.exam_id
+         AND q.id = ?
+         AND q.question_type = 'ShortAnswer'
+
+        JOIN exam_answers ans
+          ON ans.attempt_id = a.id
+         AND ans.question_id = q.id
+
+        WHERE a.id = ?
+          AND e.teacher_id = ?
+
+          AND a.status IN (
+            'PendingReview',
+            'Graded'
+          )
+
+          AND TRIM(
+            COALESCE(ans.answer_text, '')
+          ) <> ''
+
+        FOR UPDATE
+      `;
 
       db.query(
-        `UPDATE exam_answers
-         SET marks_awarded = ?, is_correct = NULL
-         WHERE id = ?`,
-        [awarded, row.answer_id],
-        (answerErr) => {
-          if (answerErr) return fail(500, 'Failed to save answer marks.');
+        verifySql,
+        [questionId, attemptId, teacherId],
+        (verifyErr, rows) => {
+
+          if (verifyErr) {
+            console.error('Verify answer error:', verifyErr);
+
+            return fail(
+              500,
+              'Failed to verify answer.'
+            );
+          }
+
+          if (!rows.length) {
+            return fail(
+              404,
+              'Reviewable short answer not found.'
+            );
+          }
+
+          const row = rows[0];
+
+          // ========== BLOCK PUBLISHED RESULTS ==========
+
+          if (Number(row.result_published) === 1) {
+            return fail(
+              409,
+              'Published results cannot be changed here.'
+            );
+          }
+
+          // ========== VALIDATE QUESTION MARKS ==========
+
+          if (awarded > Number(row.question_marks)) {
+            return fail(
+              400,
+              `Marks cannot exceed ${row.question_marks}.`
+            );
+          }
+
+          // ========== UPDATE ANSWER MARKS ==========
+
+          const updateAnswerSql = `
+            UPDATE exam_answers
+
+            SET
+              marks_awarded = ?,
+              is_correct = NULL
+
+            WHERE id = ?
+          `;
 
           db.query(
-            `SELECT COALESCE(SUM(ans.marks_awarded), 0) AS total_score,
-               SUM(CASE WHEN q.question_type = 'ShortAnswer'
-                 AND TRIM(COALESCE(ans.answer_text, '')) <> ''
-                 AND ans.marks_awarded IS NULL THEN 1 ELSE 0 END) AS pending_count
-             FROM exam_questions q
-             LEFT JOIN exam_answers ans
-               ON ans.question_id = q.id AND ans.attempt_id = ?
-             WHERE q.exam_id = ?`,
-            [attemptId, row.exam_id],
-            (sumErr, sumRows) => {
-              if (sumErr) return fail(500, 'Failed to calculate total marks.');
+            updateAnswerSql,
+            [awarded, row.answer_id],
+            (answerErr) => {
 
-              const total = Number(sumRows[0].total_score || 0);
-              const pending = Number(sumRows[0].pending_count || 0);
-              const status = pending === 0 ? 'Graded' : 'PendingReview';
+              if (answerErr) {
+                console.error(
+                  'Update answer marks error:',
+                  answerErr
+                );
+
+                return fail(
+                  500,
+                  'Failed to save answer marks.'
+                );
+              }
+
+              // ========== RECALCULATE TOTAL SCORE ==========
+
+              const sumSql = `
+                SELECT
+
+                  COALESCE(
+                    SUM(ans.marks_awarded),
+                    0
+                  ) AS total_score,
+
+                  COALESCE(
+                    SUM(
+                      CASE
+                        WHEN q.question_type = 'ShortAnswer'
+                         AND TRIM(
+                           COALESCE(ans.answer_text, '')
+                         ) <> ''
+                         AND ans.marks_awarded IS NULL
+
+                        THEN 1
+                        ELSE 0
+                      END
+                    ),
+                    0
+                  ) AS pending_count
+
+                FROM exam_questions q
+
+                LEFT JOIN exam_answers ans
+                  ON ans.question_id = q.id
+                 AND ans.attempt_id = ?
+
+                WHERE q.exam_id = ?
+              `;
 
               db.query(
-                `UPDATE exam_attempts
-                 SET total_score = ?, status = ?
-                 WHERE id = ?`,
-                [total, status, attemptId],
-                (attemptErr) => {
-                  if (attemptErr) return fail(500, 'Failed to update attempt.');
+                sumSql,
+                [attemptId, row.exam_id],
+                (sumErr, sumRows) => {
 
-                  const commitAndRespond = () => {
-                    db.commit((commitErr) => {
-                      if (commitErr) {
-                        return db.rollback(() => res.status(500).json({
-                          message: 'Failed to commit grading.'
-                        }));
+                  if (sumErr) {
+                    console.error(
+                      'Calculate total error:',
+                      sumErr
+                    );
+
+                    return fail(
+                      500,
+                      'Failed to calculate total marks.'
+                    );
+                  }
+
+                  const total = Number(
+                    sumRows[0]?.total_score || 0
+                  );
+
+                  const pending = Number(
+                    sumRows[0]?.pending_count || 0
+                  );
+
+                  const status =
+                    pending === 0
+                      ? 'Graded'
+                      : 'PendingReview';
+
+                  // ========== CALCULATE FINAL GRADE ==========
+
+                  const grade =
+                    status === 'Graded'
+                      ? calculateExamGrade(
+                          total,
+                          row.exam_total_marks
+                        )
+                      : null;
+
+                  if (
+                    total > Number(row.exam_total_marks) ||
+                    (status === 'Graded' && grade === null)
+                  ) {
+                    return fail(
+                      400,
+                      'Invalid total score or exam marks.'
+                    );
+                  }
+
+                  // ========== UPDATE EXAM ATTEMPT ==========
+
+                  const updateAttemptSql = `
+                    UPDATE exam_attempts
+
+                    SET
+                      total_score = ?,
+                      status = ?
+
+                    WHERE id = ?
+                  `;
+
+                  db.query(
+                    updateAttemptSql,
+                    [total, status, attemptId],
+                    (attemptErr) => {
+
+                      if (attemptErr) {
+                        console.error(
+                          'Update attempt error:',
+                          attemptErr
+                        );
+
+                        return fail(
+                          500,
+                          'Failed to update exam attempt.'
+                        );
                       }
 
-                      res.json({
-                        message: 'Marks saved successfully.',
-                        attempt_id: attemptId,
-                        total_score: total,
-                        status,
-                        pending_short_answers: pending
-                      });
-                    });
-                  };
+                      // ========== COMMIT HELPER ==========
 
-                  if (status !== 'Graded') return commitAndRespond();
+                      const commitAndRespond = (
+                        syncedToResults = false
+                      ) => {
 
-                  // Synchronize final marks without publishing them
-                  db.query(
-                    `SELECT id FROM exam_results
-                     WHERE exam_id = ? AND student_id = ?
-                     ORDER BY id DESC LIMIT 1 FOR UPDATE`,
-                    [row.exam_id, row.student_id],
-                    (findErr, results) => {
-                      if (findErr) return fail(500, 'Failed to check result.');
+                        db.commit((commitErr) => {
 
-                      const hasResult = results.length > 0;
+                          if (commitErr) {
+                            return db.rollback(() => {
+                              res.status(500).json({
+                                message:
+                                  'Failed to commit grading.'
+                              });
+                            });
+                          }
 
-                      const sql = hasResult
-                        ? `UPDATE exam_results
-                           SET marks_obtained = ?, status = 'Graded'
-                           WHERE id = ?`
-                        : `INSERT INTO exam_results
-                           (exam_id, student_id, marks_obtained, status)
-                           VALUES (?, ?, ?, 'Graded')`;
+                          return res.json({
+                            message:
+                              'Marks saved successfully.',
 
-                      const params = hasResult
-                        ? [total, results[0].id]
-                        : [row.exam_id, row.student_id, total];
+                            attempt_id: attemptId,
+                            exam_id: row.exam_id,
+                            student_id: row.student_id,
 
-                      db.query(sql, params, (syncErr) => {
-                        if (syncErr) return fail(500, 'Failed to sync result.');
-                        commitAndRespond();
-                      });
+                            total_score: total,
+                            total_marks:
+                              Number(row.exam_total_marks),
+
+                            grade,
+                            status,
+
+                            pending_short_answers: pending,
+
+                            synced_to_results:
+                              syncedToResults,
+
+                            result_published: false
+                          });
+                        });
+                      };
+
+                      // ========== PENDING MANUAL REVIEW ==========
+
+                      if (status !== 'Graded') {
+                        return commitAndRespond(false);
+                      }
+
+                      // ========== CHECK LATEST ATTEMPT ==========
+
+                      const latestAttemptSql = `
+                        SELECT
+                          id,
+                          attempt_number,
+                          status
+
+                        FROM exam_attempts
+
+                        WHERE exam_id = ?
+                          AND student_id = ?
+
+                        ORDER BY
+                          attempt_number DESC,
+                          id DESC
+
+                        LIMIT 1
+                      `;
+
+                      db.query(
+                        latestAttemptSql,
+                        [row.exam_id, row.student_id],
+                        (latestErr, latestRows) => {
+
+                          if (latestErr) {
+                            console.error(
+                              'Latest attempt error:',
+                              latestErr
+                            );
+
+                            return fail(
+                              500,
+                              'Failed to verify latest attempt.'
+                            );
+                          }
+
+                          const latestAttempt =
+                            latestRows[0];
+
+                          // Older attempts must never overwrite
+                          // a newer attempt's final result.
+                          if (
+                            !latestAttempt ||
+                            Number(latestAttempt.id) !== attemptId
+                          ) {
+                            return commitAndRespond(false);
+                          }
+
+                          // ========== FIND EXISTING RESULT ==========
+
+                          const findResultSql = `
+                            SELECT
+                              id,
+                              source_attempt_id
+
+                            FROM exam_results
+
+                            WHERE exam_id = ?
+                              AND student_id = ?
+
+                            ORDER BY id DESC
+
+                            LIMIT 1
+
+                            FOR UPDATE
+                          `;
+
+                          db.query(
+                            findResultSql,
+                            [row.exam_id, row.student_id],
+                            (findErr, results) => {
+
+                              if (findErr) {
+                                console.error(
+                                  'Find result error:',
+                                  findErr
+                                );
+
+                                return fail(
+                                  500,
+                                  'Failed to check final result.'
+                                );
+                              }
+
+                              const existingResult =
+                                results[0] || null;
+
+                              // ========== UPDATE EXISTING RESULT ==========
+
+                              if (existingResult) {
+
+                                const updateResultSql = `
+                                  UPDATE exam_results
+
+                                  SET
+                                    marks_obtained = ?,
+                                    grade = ?,
+                                    status = 'Graded',
+                                    source_attempt_id = ?
+
+                                  WHERE id = ?
+                                `;
+
+                                return db.query(
+                                  updateResultSql,
+                                  [
+                                    total,
+                                    grade,
+                                    attemptId,
+                                    existingResult.id
+                                  ],
+                                  (syncErr) => {
+
+                                    if (syncErr) {
+                                      console.error(
+                                        'Result sync error:',
+                                        syncErr
+                                      );
+
+                                      return fail(
+                                        500,
+                                        'Failed to update final result.'
+                                      );
+                                    }
+
+                                    return commitAndRespond(true);
+                                  }
+                                );
+                              }
+
+                              // ========== INSERT NEW RESULT ==========
+
+                              const insertResultSql = `
+                                INSERT INTO exam_results
+                                (
+                                  exam_id,
+                                  student_id,
+                                  marks_obtained,
+                                  grade,
+                                  status,
+                                  source_attempt_id
+                                )
+
+                                VALUES (
+                                  ?, ?, ?, ?, 'Graded', ?
+                                )
+                              `;
+
+                              db.query(
+                                insertResultSql,
+                                [
+                                  row.exam_id,
+                                  row.student_id,
+                                  total,
+                                  grade,
+                                  attemptId
+                                ],
+                                (insertErr) => {
+
+                                  if (insertErr) {
+                                    console.error(
+                                      'Insert result error:',
+                                      insertErr
+                                    );
+
+                                    return fail(
+                                      500,
+                                      'Failed to create final result.'
+                                    );
+                                  }
+
+                                  return commitAndRespond(true);
+                                }
+                              );
+                            }
+                          );
+                        }
+                      );
                     }
                   );
                 }
@@ -3854,8 +4785,9 @@ app.put('/api/teacher/exam-attempts/:attemptId/grade-answer', (req, res) => {
         }
       );
     });
-  });
-});
+  }
+);
+
        
 
 /* ========== INSTRUCTOR: SAVE OFFLINE EXAM RESULTS ========== */
@@ -5965,6 +6897,905 @@ app.get(
         });
       }
     );
+  }
+);
+
+
+/* ======================================================
+   ADMIN — ALL EXAMS OVERVIEW (READ ONLY)
+   ====================================================== */
+
+app.get('/api/admin/exams-overview', (req, res) => {
+  const sql = `
+    SELECT
+      e.id,
+      e.title,
+      e.exam_type,
+      e.exam_mode,
+      e.exam_status,
+      e.total_marks,
+      e.result_published,
+      e.course_batch_id,
+      DATE_FORMAT(e.exam_date, '%Y-%m-%d') AS exam_date,
+      e.start_time,
+      e.duration_minutes,
+      e.attempt_limit,
+
+      c.title AS course_title,
+      u.id AS teacher_id,
+      u.name AS teacher_name,
+
+      (
+        SELECT COUNT(DISTINCT ce.student_id)
+        FROM course_enrollments ce
+        WHERE ce.course_batch_id = e.course_batch_id
+          AND ce.status = 'Active'
+      ) AS enrolled_students,
+
+      (
+        SELECT COUNT(*)
+        FROM exam_attempts ea
+        WHERE ea.exam_id = e.id
+          AND ea.status IN (
+            'Submitted', 'PendingReview', 'Graded'
+          )
+      ) AS submitted_attempts,
+
+      (
+        SELECT COUNT(*)
+        FROM exam_results er
+        WHERE er.exam_id = e.id
+          AND er.status = 'Graded'
+      ) AS graded_results
+
+    FROM exams e
+    JOIN courses c ON c.id = e.course_id
+    JOIN users u ON u.id = e.teacher_id
+
+    ORDER BY e.exam_date DESC, e.id DESC
+    LIMIT 500
+  `;
+
+  db.query(sql, (err, rows) => {
+    if (err) {
+      console.error('Admin exams overview error:', err);
+
+      return res.status(500).json({
+        message: 'Failed to load admin exams.'
+      });
+    }
+
+    const exams = rows.map((exam) => ({
+      ...exam,
+      enrolled_students: Number(exam.enrolled_students || 0),
+      submitted_attempts: Number(exam.submitted_attempts || 0),
+      graded_results: Number(exam.graded_results || 0)
+    }));
+
+    res.json({
+      totalExams: exams.length,
+      publishedExams: exams.filter(
+        e => e.exam_status === 'Published'
+      ).length,
+      publishedResults: exams.filter(
+        e => Number(e.result_published) === 1
+      ).length,
+      exams
+    });
+  });
+});
+
+
+/* ======================================================
+   ADMIN — EXAM STUDENT RESULTS & ATTEMPTS (READ ONLY)
+   ====================================================== */
+
+app.get('/api/admin/exams/:examId/details', (req, res) => {
+  const examId = Number(req.params.examId);
+
+  if (!Number.isSafeInteger(examId) || examId <= 0) {
+    return res.status(400).json({
+      message: 'Invalid exam ID.'
+    });
+  }
+
+  const examSql = `
+    SELECT
+      e.id,
+      e.title,
+      e.exam_type,
+      e.exam_mode,
+      e.exam_status,
+      e.total_marks,
+      e.result_published,
+      e.course_batch_id,
+      DATE_FORMAT(e.exam_date, '%Y-%m-%d') AS exam_date,
+      e.start_time,
+      e.duration_minutes,
+      e.attempt_limit,
+
+      c.title AS course_title,
+      u.name AS teacher_name
+
+    FROM exams e
+    JOIN courses c ON c.id = e.course_id
+    JOIN users u ON u.id = e.teacher_id
+    WHERE e.id = ?
+    LIMIT 1
+  `;
+
+  db.query(examSql, [examId], (examErr, exams) => {
+    if (examErr) {
+      console.error('Admin exam details error:', examErr);
+
+      return res.status(500).json({
+        message: 'Failed to load exam details.'
+      });
+    }
+
+    if (!exams.length) {
+      return res.status(404).json({
+        message: 'Exam not found.'
+      });
+    }
+
+    const exam = exams[0];
+
+    const studentsSql = `
+      SELECT
+        u.id AS student_id,
+        u.name AS student_name,
+        u.email AS student_email,
+
+        er.id AS result_id,
+        er.marks_obtained,
+        er.grade,
+        er.feedback,
+        COALESCE(er.status, 'Pending') AS result_status,
+
+        (
+          SELECT COUNT(*)
+          FROM exam_attempts ea
+          WHERE ea.exam_id = ?
+            AND ea.student_id = u.id
+        ) AS attempts_used,
+
+        (
+          SELECT ea2.status
+          FROM exam_attempts ea2
+          WHERE ea2.exam_id = ?
+            AND ea2.student_id = u.id
+          ORDER BY ea2.id DESC
+          LIMIT 1
+        ) AS latest_attempt_status
+
+      FROM course_enrollments ce
+      JOIN users u
+        ON u.id = ce.student_id
+       AND u.role = 'student'
+
+      LEFT JOIN exam_results er
+        ON er.id = (
+          SELECT MAX(er2.id)
+          FROM exam_results er2
+          WHERE er2.exam_id = ?
+            AND er2.student_id = u.id
+        )
+
+      WHERE ce.course_batch_id = ?
+        AND ce.status = 'Active'
+
+      ORDER BY u.name ASC, u.id ASC
+    `;
+
+    db.query(
+      studentsSql,
+      [examId, examId, examId, exam.course_batch_id],
+      (studentErr, students) => {
+        if (studentErr) {
+          console.error(
+            'Admin exam student details error:',
+            studentErr
+          );
+
+          return res.status(500).json({
+            message: 'Failed to load exam student results.'
+          });
+        }
+
+        const formattedStudents = students.map(student => ({
+          ...student,
+          attempts_used: Number(student.attempts_used || 0),
+          marks_obtained:
+            student.marks_obtained === null
+              ? null
+              : Number(student.marks_obtained)
+        }));
+
+        return res.json({
+          exam,
+          students: formattedStudents
+        });
+      }
+    );
+  });
+});
+
+
+
+/* ============================================================
+   ADMIN REPORTS & ANALYTICS — REAL MYSQL DATA
+   GET /api/admin/reports-summary
+
+   Read-only reporting API.
+   Existing LMS APIs remain unchanged.
+   ============================================================ */
+
+app.get('/api/admin/reports-summary', async (req, res) => {
+
+  // Helper function to execute MySQL queries
+  const read = (sql, params = []) =>
+    new Promise((resolve, reject) => {
+      db.query(
+        {
+          sql,
+          values: params,
+          timeout: 10000
+        },
+        (err, rows) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows);
+          }
+        }
+      );
+    });
+
+  try {
+
+    const [
+      totals,
+      attendance,
+      performance,
+      courseEnrollments,
+      instructorSummary
+    ] = await Promise.all([
+
+      // =====================================================
+      // 1. OVERALL LMS STATISTICS
+      // =====================================================
+
+      read(`
+        SELECT
+
+          (
+            SELECT COUNT(*)
+            FROM users
+            WHERE role = 'student'
+              AND status = 'approved'
+          ) AS totalStudents,
+
+          (
+            SELECT COUNT(*)
+            FROM users
+            WHERE role = 'instructor'
+              AND status = 'approved'
+          ) AS totalTeachers,
+
+          (
+            SELECT COUNT(*)
+            FROM courses
+            WHERE status = 'Published'
+          ) AS activeCourses,
+
+          (
+            SELECT COUNT(DISTINCT ce.id)
+            FROM course_enrollments ce
+            WHERE ce.status = 'Active'
+          ) AS activeEnrollments,
+
+          (
+            SELECT COUNT(*)
+            FROM exams
+          ) AS totalExams,
+
+          (
+            SELECT COUNT(*)
+            FROM exams
+            WHERE result_published = 1
+          ) AS resultsPublished
+      `),
+
+
+      // =====================================================
+      // 2. OVERALL STUDENT ATTENDANCE
+      // =====================================================
+
+      read(`
+        SELECT
+          COUNT(*) AS total,
+
+          COALESCE(
+            SUM(
+              CASE
+                WHEN status = 'Present' THEN 1
+                ELSE 0
+              END
+            ),
+            0
+          ) AS present
+
+        FROM attendance_records
+      `),
+
+
+      // =====================================================
+      // 3. PUBLISHED EXAM PERFORMANCE
+      // =====================================================
+
+      read(`
+        SELECT
+
+          COUNT(*) AS gradedResults,
+
+          ROUND(
+            100 * SUM(er.marks_obtained)
+            / NULLIF(SUM(e.total_marks), 0),
+            1
+          ) AS performancePercentage
+
+        FROM exam_results er
+
+        JOIN exams e
+          ON e.id = er.exam_id
+
+        WHERE e.result_published = 1
+
+          AND er.status = 'Graded'
+
+          AND er.marks_obtained IS NOT NULL
+
+          AND e.total_marks > 0
+
+          AND er.id = (
+            SELECT MAX(er2.id)
+            FROM exam_results er2
+            WHERE er2.exam_id = er.exam_id
+              AND er2.student_id = er.student_id
+          )
+      `),
+
+
+      // =====================================================
+      // 4. COURSE ENROLLMENT REPORT
+      // =====================================================
+
+      read(`
+        SELECT
+
+          c.id AS course_id,
+
+          c.title AS course_title,
+
+          COUNT(DISTINCT cb.id) AS batches,
+
+          COUNT(
+            DISTINCT CASE
+              WHEN ce.status = 'Active'
+              THEN ce.id
+            END
+          ) AS active_enrollments,
+
+          COUNT(
+            DISTINCT CASE
+              WHEN ce.status = 'Active'
+              THEN ce.student_id
+            END
+          ) AS unique_students
+
+        FROM courses c
+
+        LEFT JOIN course_batches cb
+          ON cb.course_id = c.id
+
+        LEFT JOIN course_enrollments ce
+          ON ce.course_batch_id = cb.id
+
+        WHERE c.status = 'Published'
+
+        GROUP BY c.id, c.title
+
+        ORDER BY
+          active_enrollments DESC,
+          c.title ASC
+      `),
+
+
+      // =====================================================
+      // 5. INSTRUCTOR WORKLOAD REPORT
+      // =====================================================
+
+      read(`
+        SELECT
+
+          u.id AS teacher_id,
+
+          u.name AS teacher_name,
+
+          COUNT(
+            DISTINCT cb.course_id
+          ) AS assigned_courses,
+
+          COUNT(
+            DISTINCT cb.id
+          ) AS assigned_batches
+
+        FROM users u
+
+        LEFT JOIN course_batches cb
+          ON cb.instructor_id = u.id
+
+        WHERE u.role = 'instructor'
+          AND u.status = 'approved'
+
+        GROUP BY u.id, u.name
+
+        ORDER BY
+          assigned_courses DESC,
+          u.name ASC
+      `)
+
+    ]);
+
+
+    // =====================================================
+    // 6. FORMAT MYSQL RESULTS
+    // =====================================================
+
+    const t = totals[0] || {};
+    const a = attendance[0] || {};
+    const p = performance[0] || {};
+
+    const totalRecords = Number(a.total || 0);
+
+    const performancePercentage =
+      p.performancePercentage == null
+        ? null
+        : Number(p.performancePercentage);
+
+
+    // =====================================================
+    // 7. SEND FINAL REPORT DATA
+    // =====================================================
+
+    return res.json({
+
+      summary: {
+
+        totalStudents:
+          Number(t.totalStudents || 0),
+
+        totalTeachers:
+          Number(t.totalTeachers || 0),
+
+        activeCourses:
+          Number(t.activeCourses || 0),
+
+        activeEnrollments:
+          Number(t.activeEnrollments || 0),
+
+        totalExams:
+          Number(t.totalExams || 0),
+
+        resultsPublished:
+          Number(t.resultsPublished || 0),
+
+        gradedResults:
+          Number(p.gradedResults || 0),
+
+        attendancePercentage:
+          totalRecords > 0
+            ? Number(
+                (
+                  Number(a.present || 0) *
+                  100 /
+                  totalRecords
+                ).toFixed(1)
+              )
+            : null,
+
+        performancePercentage:
+          performancePercentage
+
+      },
+
+
+      // COURSE ENROLLMENT DATA
+
+      courseEnrollments: courseEnrollments.map(
+        (row) => ({
+          course_id: row.course_id,
+
+          course_title: row.course_title,
+
+          batches:
+            Number(row.batches || 0),
+
+          active_enrollments:
+            Number(row.active_enrollments || 0),
+
+          unique_students:
+            Number(row.unique_students || 0)
+        })
+      ),
+
+
+      // INSTRUCTOR REPORT DATA
+
+      instructorSummary: instructorSummary.map(
+        (row) => ({
+          teacher_id: row.teacher_id,
+
+          teacher_name: row.teacher_name,
+
+          assigned_courses:
+            Number(row.assigned_courses || 0),
+
+          assigned_batches:
+            Number(row.assigned_batches || 0)
+        })
+      )
+
+    });
+
+  } catch (err) {
+
+    console.error(
+      'Admin reports summary error:',
+      err
+    );
+
+    return res.status(500).json({
+      message:
+        'Unable to load reports. Check backend logs.'
+    });
+
+  }
+
+});
+
+
+/* =========================================================
+   ADMIN EXAM REPORTS — READ ONLY
+   Overview + student results + individual attempt timeline
+   ========================================================= */
+
+const adminExamReportQuery = (sql, values = []) =>
+  new Promise((resolve, reject) => {
+    db.query(
+      { sql, values, timeout: 10000 },
+      (error, rows) => {
+        if (error) reject(error);
+        else resolve(rows);
+      }
+    );
+  });
+
+// Get actual creation timestamp only if exams.created_at exists.
+// Never substitute exam_date as the creation date.
+const getExamCreationColumn = async () => {
+  const columns = await adminExamReportQuery(
+    "SHOW COLUMNS FROM exams LIKE 'created_at'"
+  );
+
+  return columns.length > 0
+    ? "DATE_FORMAT(e.created_at, '%Y-%m-%d %H:%i:%s')"
+    : "NULL";
+};
+
+
+// =============== ALL EXAM REPORTS ===============
+
+app.get('/api/admin/exam-reports', async (req, res) => {
+  try {
+    const createdExpression =
+      await getExamCreationColumn();
+
+    const exams = await adminExamReportQuery(`
+      SELECT
+        e.id,
+        e.title,
+        e.exam_type,
+        e.exam_mode,
+        e.exam_status,
+        e.result_published,
+        e.total_marks,
+        e.course_batch_id,
+
+        DATE_FORMAT(e.exam_date, '%Y-%m-%d')
+          AS exam_date,
+
+        TIME_FORMAT(e.start_time, '%H:%i:%s')
+          AS start_time,
+
+        e.duration_minutes,
+        e.attempt_limit,
+
+        ${createdExpression} AS created_at,
+
+        c.title AS course_title,
+
+        u.id AS teacher_id,
+        u.name AS teacher_name,
+
+        (
+          SELECT COUNT(DISTINCT ce.student_id)
+          FROM course_enrollments ce
+          WHERE ce.course_batch_id = e.course_batch_id
+            AND ce.status = 'Active'
+        ) AS total_students,
+
+        (
+          SELECT COUNT(DISTINCT ea.student_id)
+          FROM exam_attempts ea
+          WHERE ea.exam_id = e.id
+        ) AS students_attempted,
+
+        (
+          SELECT COUNT(*)
+          FROM exam_attempts ea
+          WHERE ea.exam_id = e.id
+        ) AS total_attempts,
+
+        (
+          SELECT COUNT(DISTINCT er.student_id)
+          FROM exam_results er
+          WHERE er.exam_id = e.id
+            AND er.status = 'Graded'
+        ) AS graded_students
+
+      FROM exams e
+
+      JOIN courses c
+        ON c.id = e.course_id
+
+      JOIN users u
+        ON u.id = e.teacher_id
+
+      ORDER BY e.exam_date DESC, e.id DESC
+    `);
+
+    return res.json({
+      totalExams: exams.length,
+
+      publishedExams: exams.filter(
+        e => e.exam_status === 'Published'
+      ).length,
+
+      resultsPublished: exams.filter(
+        e => Number(e.result_published) === 1
+      ).length,
+
+      exams: exams.map(e => ({
+        ...e,
+        total_students: Number(e.total_students || 0),
+        students_attempted: Number(e.students_attempted || 0),
+        total_attempts: Number(e.total_attempts || 0),
+        graded_students: Number(e.graded_students || 0),
+        result_published: Number(e.result_published || 0)
+      }))
+    });
+
+  } catch (error) {
+    console.error('Admin exam reports error:', error);
+
+    return res.status(500).json({
+      message: 'Failed to load exam reports.'
+    });
+  }
+});
+
+
+// =============== SINGLE EXAM FULL REPORT ===============
+
+app.get(
+  '/api/admin/exam-reports/:examId',
+  async (req, res) => {
+    const examId = Number(req.params.examId);
+
+    if (!Number.isSafeInteger(examId) || examId <= 0) {
+      return res.status(400).json({
+        message: 'Invalid exam ID.'
+      });
+    }
+
+    try {
+      const createdExpression =
+        await getExamCreationColumn();
+
+      const exams = await adminExamReportQuery(`
+        SELECT
+          e.id,
+          e.title,
+          e.exam_type,
+          e.exam_mode,
+          e.exam_status,
+          e.result_published,
+          e.total_marks,
+          e.course_batch_id,
+
+          DATE_FORMAT(e.exam_date, '%Y-%m-%d')
+            AS exam_date,
+
+          TIME_FORMAT(e.start_time, '%H:%i:%s')
+            AS start_time,
+
+          e.duration_minutes,
+          e.attempt_limit,
+
+          ${createdExpression} AS created_at,
+
+          c.title AS course_title,
+          u.name AS teacher_name
+
+        FROM exams e
+
+        JOIN courses c
+          ON c.id = e.course_id
+
+        JOIN users u
+          ON u.id = e.teacher_id
+
+        WHERE e.id = ?
+        LIMIT 1
+      `, [examId]);
+
+      if (!exams.length) {
+        return res.status(404).json({
+          message: 'Exam not found.'
+        });
+      }
+
+      const exam = exams[0];
+
+      // Enrolled students and latest stored exam result
+      const students = await adminExamReportQuery(`
+        SELECT
+          u.id AS student_id,
+          u.name AS student_name,
+          u.email AS student_email,
+
+          er.id AS result_id,
+          er.marks_obtained,
+          er.grade,
+          er.feedback,
+
+          COALESCE(er.status, 'Pending')
+            AS result_status
+
+        FROM users u
+
+        JOIN course_enrollments ce
+          ON ce.student_id = u.id
+         AND ce.status = 'Active'
+
+        LEFT JOIN exam_results er
+          ON er.id = (
+            SELECT MAX(er2.id)
+            FROM exam_results er2
+            WHERE er2.exam_id = ?
+              AND er2.student_id = u.id
+          )
+
+        WHERE ce.course_batch_id = ?
+          AND u.role = 'student'
+
+        GROUP BY
+          u.id,
+          u.name,
+          u.email,
+          er.id,
+          er.marks_obtained,
+          er.grade,
+          er.feedback,
+          er.status
+
+        ORDER BY u.name ASC
+      `, [examId, exam.course_batch_id]);
+
+      // Every recorded attempt, including retakes
+      const attempts = await adminExamReportQuery(`
+        SELECT
+          ea.id AS attempt_id,
+          ea.student_id,
+          u.name AS student_name,
+
+          ea.attempt_number,
+          ea.status,
+          ea.total_score,
+
+          DATE_FORMAT(
+            ea.started_at, '%Y-%m-%d %H:%i:%s'
+          ) AS started_at,
+
+          DATE_FORMAT(
+            ea.submitted_at, '%Y-%m-%d %H:%i:%s'
+          ) AS submitted_at,
+
+          DATE_FORMAT(
+            ea.expires_at, '%Y-%m-%d %H:%i:%s'
+          ) AS expires_at
+
+        FROM exam_attempts ea
+
+        JOIN users u
+          ON u.id = ea.student_id
+
+        WHERE ea.exam_id = ?
+
+        ORDER BY
+          ea.student_id ASC,
+          ea.attempt_number ASC,
+          ea.id ASC
+      `, [examId]);
+
+      const attemptMap = new Map();
+
+      for (const attempt of attempts) {
+        const key = Number(attempt.student_id);
+
+        if (!attemptMap.has(key)) {
+          attemptMap.set(key, []);
+        }
+
+        attemptMap.get(key).push({
+          ...attempt,
+          total_score:
+            attempt.total_score == null
+              ? null
+              : Number(attempt.total_score)
+        });
+      }
+
+      const formattedStudents = students.map(student => ({
+        ...student,
+
+        marks_obtained:
+          student.marks_obtained == null
+            ? null
+            : Number(student.marks_obtained),
+
+        attempts: attemptMap.get(
+          Number(student.student_id)
+        ) || []
+      }));
+
+      return res.json({
+        exam: {
+          ...exam,
+          result_published: Number(
+            exam.result_published || 0
+          )
+        },
+
+        students: formattedStudents,
+
+        totalAttempts: attempts.length,
+
+        studentsAttempted: attemptMap.size
+      });
+
+    } catch (error) {
+      console.error(
+        'Admin full exam report error:',
+        error
+      );
+
+      return res.status(500).json({
+        message: 'Failed to load full exam report.'
+      });
+    }
   }
 );
 
