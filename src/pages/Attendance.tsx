@@ -76,15 +76,20 @@ function Attendance() {
   };
 
   const formatDate = (date: string) => {
-    if (!date) return "-";
+  if (!date) return "-";
 
-    return new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Asia/Karachi",
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-    }).format(new Date(date));
-  };
+  const [year, month, day] = date.slice(0, 10).split("-");
+
+  return new Date(
+    Number(year),
+    Number(month) - 1,
+    Number(day)
+  ).toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+};
 
   const formatTime = (time: string) => {
     if (!time) return "-";
