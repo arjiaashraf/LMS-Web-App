@@ -7,6 +7,8 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -96,71 +98,439 @@ db.connect((err) => {
   console.log('Connected to MySQL database: lms_database');
 });
 
-// ================= AUTHENTICATION APIs =================
 
-// 1. REGISTER API
+/* ========== CAMPUS 95 AUTH HELPERS ========== */
+
+const EMAIL_OTP_MINUTES = 10;
+const MAX_OTP_ATTEMPTS = 5;
+
+const mailTransport = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: Number(process.env.SMTP_PORT || 465),
+  secure: Number(process.env.SMTP_PORT || 465) === 465,
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+});
+
+const authQuery = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.query(
+      { sql, values: params, timeout: 10000 },
+      (err, rows) => {
+        if (err) reject(err);
+        else resolve(rows);
+      }
+    );
+  });
+
+const normalizeEmail = (email) =>
+  String(email || '').trim().toLowerCase();
+
+const makeOtp = () =>
+  crypto.randomInt(100000, 1000000).toString();
+
+const createLoginToken = (user) => {
+  if (!process.env.JWT_SECRET) {
+    throw new Error('JWT_SECRET is not configured.');
+  }
+
+  return jwt.sign(
+    {
+      sub: String(user.id),
+      role: user.role
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: '2h', algorithm: 'HS256' }
+  );
+};
+
+const sendVerificationCode = async (user) => {
+  const otp = makeOtp();
+  const hash = await bcrypt.hash(otp, 10);
+
+  await authQuery(
+    `INSERT INTO email_verification_codes
+       (user_id, code_hash, expires_at, attempts, created_at)
+     VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 10 MINUTE), 0, NOW())
+     ON DUPLICATE KEY UPDATE
+       code_hash = VALUES(code_hash),
+       expires_at = VALUES(expires_at),
+       attempts = 0,
+       created_at = NOW()`,
+    [user.id, hash]
+  );
+
+  await mailTransport.sendMail({
+    from: process.env.EMAIL_FROM || process.env.SMTP_USER,
+    to: user.email,
+    subject: 'Campus 95 - Verify Your Email',
+    text:
+      `Welcome to Campus 95!\n\n` +
+      `Your verification code is: ${otp}\n\n` +
+      `This code expires in ${EMAIL_OTP_MINUTES} minutes.\n\n` +
+      `If you did not create this account, ignore this email.`
+  });
+};
+
+
+/* =================================================
+   1. REGISTER WITH EMAIL VERIFICATION
+   ================================================= */
+
 app.post('/api/register', async (req, res) => {
-  const { name, email, password, role } = req.body;
+  const name = String(req.body?.name || '').trim();
+  const email = normalizeEmail(req.body?.email);
+  const password = req.body?.password;
+  const role = req.body?.role;
+
+  if (
+    name.length < 2 ||
+    name.length > 100 ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+    typeof password !== 'string' ||
+    password.length < 8 ||
+    password.length > 72 ||
+    !['student', 'instructor'].includes(role)
+  ) {
+    return res.status(400).json({
+      message: 'Enter valid details and a password of 8–72 characters.'
+    });
+  }
 
   try {
-    db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
-      if (err) return res.status(500).json({ message: 'Database error', error: err });
-      
-      if (results.length > 0) {
-        return res.status(400).json({ message: 'Email is already registered!' });
-      }
+    const existing = await authQuery(
+      'SELECT id FROM users WHERE email = ? LIMIT 1',
+      [email]
+    );
 
-      const hashedPassword = await bcrypt.hash(password, 10);
-      const userStatus = 'pending';
-
-      const query = 'INSERT INTO users (name, email, password, role, status) VALUES (?, ?, ?, ?, ?)';
-      db.query(query, [name, email, hashedPassword, role, userStatus], (err, result) => {
-        if (err) {
-          return res.status(500).json({ message: 'Database error', error: err });
-        }
-        res.status(201).json({ message: 'Account created successfully! Waiting for admin approval.' });
+    if (existing.length) {
+      return res.status(409).json({
+        message: 'Email is already registered.'
       });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    const result = await authQuery(
+      `INSERT INTO users
+       (name, email, password, role, status, email_verified)
+       VALUES (?, ?, ?, ?, 'pending', 0)`,
+      [name, email, passwordHash, role]
+    );
+
+    let emailSent = true;
+
+    try {
+      await sendVerificationCode({
+        id: result.insertId,
+        email
+      });
+    } catch (mailError) {
+      emailSent = false;
+      console.error('Registration OTP email error:', mailError);
+    }
+
+    return res.status(201).json({
+      message: emailSent
+        ? 'Account created. Check your email for the verification code.'
+        : 'Account created, but verification email could not be sent. Try Resend Code.',
+      email,
+      verification_required: true,
+      email_sent: emailSent
     });
   } catch (error) {
-    res.status(500).json({ message: 'Server error', error });
+    console.error('Registration error:', error);
+
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        message: 'Email is already registered.'
+      });
+    }
+
+    return res.status(500).json({
+      message: 'Registration failed.'
+    });
   }
 });
 
-// 2. LOGIN API
-app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body;
 
-  db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
-    if (err || results.length === 0) {
-      return res.status(401).json({ message: 'Invalid email or password.' });
-    }
+/* =================================================
+   2. VERIFY EMAIL OTP
+   ================================================= */
 
-    const user = results[0];
+app.post('/api/auth/verify-email', async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const code = String(req.body?.code || '').trim();
 
-    let isMatch = false;
-    if (user.password.startsWith('$2b$') || user.password.startsWith('$2a$')) {
-      isMatch = await bcrypt.compare(password, user.password);
-    } else {
-      isMatch = (password === user.password);
-    }
-
-    if (!isMatch) {
-      return res.status(401).json({ message: 'Invalid email or password.' });
-    }
-
-    if (user.role !== 'admin' && user.status === 'pending') {
-      return res.status(403).json({ message: 'Your account is pending admin approval.' });
-    }
-
-    res.json({
-      message: 'Login successful!',
-      id: user.id,
-      role: user.role,
-      name: user.name,
-      email: user.email
+  if (!/^\d{6}$/.test(code)) {
+    return res.status(400).json({
+      message: 'Enter a valid 6-digit code.'
     });
-  });
+  }
+
+  try {
+    const users = await authQuery(
+      `SELECT id, email_verified
+       FROM users WHERE email = ? LIMIT 1`,
+      [email]
+    );
+
+    if (!users.length) {
+      return res.status(400).json({
+        message: 'Invalid or expired verification code.'
+      });
+    }
+
+    const user = users[0];
+
+    if (Number(user.email_verified) === 1) {
+      return res.json({
+        message: 'Email already verified.'
+      });
+    }
+
+    // Atomically consume one verification attempt.
+    const counter = await authQuery(
+      `UPDATE email_verification_codes
+       SET attempts = attempts + 1
+       WHERE user_id = ?
+         AND expires_at > NOW()
+         AND attempts < ?`,
+      [user.id, MAX_OTP_ATTEMPTS]
+    );
+
+    if (!counter.affectedRows) {
+      return res.status(400).json({
+        message: 'Code expired or attempts exceeded. Request a new code.'
+      });
+    }
+
+    const rows = await authQuery(
+      `SELECT code_hash
+       FROM email_verification_codes
+       WHERE user_id = ?
+       LIMIT 1`,
+      [user.id]
+    );
+
+    if (!rows.length) {
+      return res.status(400).json({
+        message: 'Invalid or expired verification code.'
+      });
+    }
+
+    const valid = await bcrypt.compare(
+      code,
+      rows[0].code_hash
+    );
+
+    if (!valid) {
+      return res.status(400).json({
+        message: 'Incorrect verification code.'
+      });
+    }
+
+    await authQuery(
+      'UPDATE users SET email_verified = 1 WHERE id = ?',
+      [user.id]
+    );
+
+    await authQuery(
+      'DELETE FROM email_verification_codes WHERE user_id = ?',
+      [user.id]
+    );
+
+    return res.json({
+      message: 'Email verified! Your account is awaiting admin approval.'
+    });
+  } catch (error) {
+    console.error('Email verification error:', error);
+
+    return res.status(500).json({
+      message: 'Could not verify email.'
+    });
+  }
 });
+
+
+/* =================================================
+   3. RESEND VERIFICATION OTP
+   ================================================= */
+
+app.post('/api/auth/resend-otp', async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({
+      message: 'Enter a valid email.'
+    });
+  }
+
+  const genericResponse = {
+    message: 'If your account needs verification, a new code will be sent.'
+  };
+
+  try {
+    const users = await authQuery(
+      `SELECT id, email, email_verified
+       FROM users WHERE email = ? LIMIT 1`,
+      [email]
+    );
+
+    if (
+      !users.length ||
+      Number(users[0].email_verified) === 1
+    ) {
+      return res.json(genericResponse);
+    }
+
+    const codes = await authQuery(
+      `SELECT created_at
+       FROM email_verification_codes
+       WHERE user_id = ?
+       LIMIT 1`,
+      [users[0].id]
+    );
+
+    if (codes.length) {
+      const seconds = (
+        Date.now() -
+        new Date(codes[0].created_at).getTime()
+      ) / 1000;
+
+      if (seconds < 60) {
+        return res.status(429).json({
+          message: 'Please wait at least 60 seconds before resending.'
+        });
+      }
+    }
+
+    await sendVerificationCode(users[0]);
+
+    return res.json(genericResponse);
+  } catch (error) {
+    console.error('Resend OTP error:', error);
+
+    return res.status(500).json({
+      message: 'Unable to resend code right now.'
+    });
+  }
+});
+
+
+/* =================================================
+   4. SECURE LOGIN WITH JWT
+   ================================================= */
+
+app.post('/api/login', async (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+  const password = req.body?.password;
+
+  if (
+    !email ||
+    typeof password !== 'string' ||
+    !password
+  ) {
+    return res.status(400).json({
+      message: 'Email and password are required.'
+    });
+  }
+
+  try {
+    const users = await authQuery(
+      `SELECT id, name, email, password,
+              role, status, email_verified
+       FROM users
+       WHERE email = ?
+       LIMIT 1`,
+      [email]
+    );
+
+    if (!users.length) {
+      return res.status(401).json({
+        message: 'Invalid email or password.'
+      });
+    }
+
+    const user = users[0];
+    const storedPassword = String(user.password || '');
+
+    const isHashed =
+      /^\$2[aby]\$/.test(storedPassword);
+
+    let validPassword = false;
+
+    if (isHashed) {
+      validPassword = await bcrypt.compare(
+        password,
+        storedPassword
+      );
+    } else {
+      // Temporary migration support for legacy accounts.
+      // Remove after all plaintext passwords are migrated.
+      const supplied = Buffer.from(password);
+      const stored = Buffer.from(storedPassword);
+
+      validPassword =
+        supplied.length === stored.length &&
+        crypto.timingSafeEqual(supplied, stored);
+    }
+
+    if (!validPassword) {
+      return res.status(401).json({
+        message: 'Invalid email or password.'
+      });
+    }
+
+    // Upgrade legacy password immediately on successful login.
+    if (!isHashed) {
+      const upgraded = await bcrypt.hash(password, 12);
+
+      await authQuery(
+        'UPDATE users SET password = ? WHERE id = ?',
+        [upgraded, user.id]
+      );
+    }
+
+    if (Number(user.email_verified) !== 1) {
+      return res.status(403).json({
+        message: 'Please verify your email before logging in.',
+        verification_required: true,
+        email: user.email
+      });
+    }
+
+    if (
+      user.role !== 'admin' &&
+      user.status !== 'approved'
+    ) {
+      return res.status(403).json({
+        message: 'Your account is waiting for admin approval.'
+      });
+    }
+
+    const token = createLoginToken(user);
+
+    return res.json({
+      message: 'Login successful!',
+      token,
+      token_type: 'Bearer',
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+
+    return res.status(500).json({
+      message: 'Login failed.'
+    });
+  }
+});
+
 
 
 // ================= ADMIN MANAGEMENT APIs =================
@@ -174,7 +544,7 @@ app.get('/api/admin/pending-users', (req, res) => {
 
 app.put('/api/admin/approve-user/:id', (req, res) => {
   const userId = req.params.id;
-  db.query("UPDATE users SET status = 'approved' WHERE id = ?", [userId], (err, result) => {
+  db.query("UPDATE users SET status = 'approved' WHERE id = ? AND email_verified = 1", [userId], (err, result) => {
     if (err) return res.status(500).json({ message: 'Database error', error: err });
     res.json({ message: 'User approved successfully!' });
   });

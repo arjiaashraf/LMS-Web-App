@@ -13,6 +13,7 @@ import AdminExams from "./pages/AdminExams";
 import Settings from "./pages/Settings";
 import OnlineClasses from "./pages/OnlineClass";
 import Reports from "./pages/Reports";
+import VerifyEmail from "./pages/VerifyEmail";
 
 // ================= AUTH PAGES =================
 
@@ -63,6 +64,8 @@ function App() {
           path="/register"
           element={<Register />}
         />
+
+        <Route path="/verify-email" element={<VerifyEmail />} />
 
         {/* ========== ADMIN ROUTES ========== */}
 
