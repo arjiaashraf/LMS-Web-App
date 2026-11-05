@@ -2683,7 +2683,7 @@ app.put('/api/teacher/exams/:examId/publish', (req, res) => {
         });
       }
     }
-
+    
     const updateQuery = `
       UPDATE exams
       SET exam_status = 'Published'
@@ -4137,6 +4137,17 @@ app.put(
 
 // 2. PUBLISH EXAM RESULTS
 
+
+/* =====================================================
+   SMART LMS — PUBLISH EXAM RESULTS
+   Supports:
+   - Online and Offline exams
+   - Individual extensions / retakes
+   - Pending grading checks
+   - Latest attempt result synchronization
+   - Automatic grade calculation
+   ===================================================== */
+
 app.put(
   '/api/teacher/exams/:examId/publish-results',
   (req, res) => {
@@ -4145,7 +4156,7 @@ app.put(
 
     if (
       ![examId, teacherId].every(
-        (n) => Number.isSafeInteger(n) && n > 0
+        n => Number.isSafeInteger(n) && n > 0
       )
     ) {
       return res.status(400).json({
@@ -4155,6 +4166,8 @@ app.put(
 
     db.beginTransaction((beginErr) => {
       if (beginErr) {
+        console.error('Begin publication:', beginErr);
+
         return res.status(500).json({
           message: 'Could not begin publication.'
         });
@@ -4162,9 +4175,11 @@ app.put(
 
       const fail = (status, message) => {
         db.rollback(() => {
-          res.status(status).json({ message });
+          return res.status(status).json({ message });
         });
       };
+
+      /* ========== VERIFY EXAM ========== */
 
       const verifySql = `
         SELECT
@@ -4198,7 +4213,12 @@ app.put(
         [examId, teacherId],
         (examErr, examRows) => {
           if (examErr) {
-            return fail(500, 'Could not verify exam.');
+            console.error('Verify exam:', examErr);
+
+            return fail(
+              500,
+              'Could not verify exam.'
+            );
           }
 
           if (examRows.length !== 1) {
@@ -4224,231 +4244,317 @@ app.put(
             );
           }
 
-          if (exam.exam_mode === 'Online') {
-            if (Number(exam.exam_window_ended) !== 1) {
-              return fail(
-                409,
-                'Wait until the scheduled online exam window ends before publishing.'
-              );
-            }
+          if (
+            !Number.isFinite(Number(exam.total_marks)) ||
+            Number(exam.total_marks) <= 0
+          ) {
+            return fail(
+              409,
+              'Exam total marks must be greater than zero.'
+            );
           }
 
-          // Check if grading is complete.
+          if (
+            exam.exam_mode === 'Online' &&
+            Number(exam.exam_window_ended) !== 1
+          ) {
+            return fail(
+              409,
+              'Wait until the scheduled online exam window ends.'
+            );
+          }
 
-          const checkSql =
-            exam.exam_mode === 'Online'
-              ? `
-                SELECT
+          /* ========== CHECK STUDENT EXTENSIONS ========== */
 
-                  (
-                    SELECT COUNT(*)
-                    FROM exam_attempts a
-                    WHERE a.exam_id = ?
-                      AND a.status IN (
-                        'InProgress',
-                        'Submitted',
-                        'PendingReview'
-                      )
-                  ) AS pending,
+          const extensionSql = `
+            SELECT COUNT(*) AS active_extensions
 
-                  (
-                    SELECT COUNT(*)
-                    FROM exam_attempts a
-                    WHERE a.exam_id = ?
-                      AND a.status = 'Graded'
-                  ) AS graded,
+            FROM student_exam_extensions x
 
-                  (
-                    SELECT COUNT(*)
-                    FROM exam_attempts a
-                    WHERE a.exam_id = ?
-                      AND a.status = 'Graded'
-                      AND NOT EXISTS (
-                        SELECT 1
-                        FROM exam_results er
-                        WHERE er.exam_id = a.exam_id
-                          AND er.student_id = a.student_id
-                          AND er.status = 'Graded'
-                          AND er.marks_obtained IS NOT NULL
-                      )
-                  ) AS missing_results
-              `
-              : `
-                SELECT
+            JOIN course_enrollments ce
+              ON ce.student_id = x.student_id
+             AND ce.course_batch_id = ?
+             AND ce.status = 'Active'
 
-                  (
-                    SELECT COUNT(*)
-                    FROM course_enrollments ce
-                    WHERE ce.course_batch_id = ?
-                      AND ce.status = 'Active'
-                      AND NOT EXISTS (
-                        SELECT 1
-                        FROM exam_results er
-                        WHERE er.exam_id = ?
-                          AND er.student_id = ce.student_id
-                          AND er.status = 'Graded'
-                          AND er.marks_obtained IS NOT NULL
-                      )
-                  ) AS pending,
-
-                  (
-                    SELECT COUNT(*)
-                    FROM exam_results er
-                    WHERE er.exam_id = ?
-                      AND er.status = 'Graded'
-                      AND er.marks_obtained IS NOT NULL
-                  ) AS graded,
-
-                  0 AS missing_results
-              `;
-
-          const args =
-            exam.exam_mode === 'Online'
-              ? [examId, examId, examId]
-              : [
-                  exam.course_batch_id,
-                  examId,
-                  examId
-                ];
+            WHERE x.exam_id = ?
+              AND x.end_at > NOW()
+          `;
 
           db.query(
-            checkSql,
-            args,
-            (checkErr, checkRows) => {
-              if (checkErr) {
+            extensionSql,
+            [exam.course_batch_id, examId],
+            (extensionErr, extensionRows) => {
+              if (extensionErr) {
                 console.error(
-                  'Publish result validation:',
-                  checkErr
+                  'Extension verification:',
+                  extensionErr
                 );
 
                 return fail(
                   500,
-                  'Could not check grading completion.'
+                  'Could not verify student extensions.'
                 );
               }
 
-              const counts = checkRows[0];
-
-              if (Number(counts.pending) > 0) {
+              if (
+                Number(
+                  extensionRows[0]?.active_extensions || 0
+                ) > 0
+              ) {
                 return fail(
                   409,
-                  'Some students or exam attempts are not graded yet. Complete grading first.'
+                  'Some students have active or upcoming extensions. Wait until all extension windows end.'
                 );
               }
 
-              if (Number(counts.missing_results) > 0) {
-                return fail(
-                  409,
-                  'Some graded attempts are missing synchronized exam_results. Sync them before publishing.'
-                );
-              }
+              /* ========== CHECK GRADING ========== */
 
-              if (Number(counts.graded) === 0) {
-                return fail(
-                  409,
-                  'No graded results are available to publish.'
-                );
-              }
+              const checkSql =
+                exam.exam_mode === 'Online'
+                  ? `
+                    SELECT
 
-              // Calculate grades automatically.
-              // Example grading scale:
-              // A+ >= 90%, A >= 80%, B >= 70%,
-              // C >= 60%, D >= 50%, F < 50%.
+                      (
+                        SELECT COUNT(*)
+                        FROM exam_attempts a
+                        WHERE a.exam_id = ?
+                          AND a.status IN (
+                            'InProgress',
+                            'Submitted',
+                            'PendingReview'
+                          )
+                      ) AS pending,
 
-              const gradeSql = `
-                UPDATE exam_results er
-                JOIN exams e
-                  ON e.id = er.exam_id
+                      (
+                        SELECT COUNT(*)
+                        FROM exam_attempts a
+                        WHERE a.exam_id = ?
+                          AND a.status = 'Graded'
+                      ) AS graded,
 
-                SET er.grade = CASE
+                      (
+                        SELECT COUNT(*)
+                        FROM exam_attempts a
+                        WHERE a.exam_id = ?
+                          AND a.status = 'Graded'
 
-                  WHEN er.marks_obtained /
-                       e.total_marks * 100 >= 90
-                    THEN 'A+'
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM exam_attempts newer
+                            WHERE newer.exam_id = a.exam_id
+                              AND newer.student_id = a.student_id
+                              AND (
+                                newer.attempt_number >
+                                  a.attempt_number
+                                OR (
+                                  newer.attempt_number =
+                                    a.attempt_number
+                                  AND newer.id > a.id
+                                )
+                              )
+                          )
 
-                  WHEN er.marks_obtained /
-                       e.total_marks * 100 >= 80
-                    THEN 'A'
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM exam_results er
+                            WHERE er.exam_id = a.exam_id
+                              AND er.student_id = a.student_id
+                              AND er.status = 'Graded'
+                              AND er.marks_obtained IS NOT NULL
+                              AND er.source_attempt_id = a.id
+                              AND ABS(
+                                er.marks_obtained -
+                                COALESCE(a.total_score, 0)
+                              ) < 0.001
+                          )
+                      ) AS missing_results
+                  `
+                  : `
+                    SELECT
 
-                  WHEN er.marks_obtained /
-                       e.total_marks * 100 >= 70
-                    THEN 'B'
+                      (
+                        SELECT COUNT(*)
+                        FROM course_enrollments ce
+                        WHERE ce.course_batch_id = ?
+                          AND ce.status = 'Active'
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM exam_results er
+                            WHERE er.exam_id = ?
+                              AND er.student_id = ce.student_id
+                              AND er.status = 'Graded'
+                              AND er.marks_obtained IS NOT NULL
+                          )
+                      ) AS pending,
 
-                  WHEN er.marks_obtained /
-                       e.total_marks * 100 >= 60
-                    THEN 'C'
+                      (
+                        SELECT COUNT(*)
+                        FROM exam_results er
+                        WHERE er.exam_id = ?
+                          AND er.status = 'Graded'
+                          AND er.marks_obtained IS NOT NULL
+                      ) AS graded,
 
-                  WHEN er.marks_obtained /
-                       e.total_marks * 100 >= 50
-                    THEN 'D'
+                      0 AS missing_results
+                  `;
 
-                  ELSE 'F'
-
-                END
-
-                WHERE er.exam_id = ?
-                  AND er.status = 'Graded'
-                  AND er.marks_obtained IS NOT NULL
-                  AND e.total_marks > 0
-              `;
+              const args =
+                exam.exam_mode === 'Online'
+                  ? [examId, examId, examId]
+                  : [
+                      exam.course_batch_id,
+                      examId,
+                      examId
+                    ];
 
               db.query(
-                gradeSql,
-                [examId],
-                (gradeErr) => {
-                  if (gradeErr) {
+                checkSql,
+                args,
+                (checkErr, checkRows) => {
+                  if (checkErr) {
                     console.error(
-                      'Grade calculation error:',
-                      gradeErr
+                      'Grading verification:',
+                      checkErr
                     );
 
                     return fail(
                       500,
-                      'Could not calculate grades.'
+                      'Could not verify grading and result synchronization.'
                     );
                   }
 
-                  // Publish results only after grading succeeds.
+                  const counts = checkRows[0];
 
-                  const publishSql = `
-                    UPDATE exams
-                    SET result_published = 1
-                    WHERE id = ?
-                      AND teacher_id = ?
-                      AND result_published = 0
+                  if (Number(counts.pending) > 0) {
+                    return fail(
+                      409,
+                      'Some exam attempts are incomplete or awaiting grading.'
+                    );
+                  }
+
+                  if (Number(counts.missing_results) > 0) {
+                    return fail(
+                      409,
+                      'Latest graded attempts are not synchronized with exam_results.'
+                    );
+                  }
+
+                  if (Number(counts.graded) === 0) {
+                    return fail(
+                      409,
+                      'No graded results are available to publish.'
+                    );
+                  }
+
+                  /* ========== CALCULATE GRADES ========== */
+
+                  const gradeSql = `
+                    UPDATE exam_results er
+
+                    JOIN exams e
+                      ON e.id = er.exam_id
+
+                    SET er.grade = CASE
+
+                      WHEN er.marks_obtained /
+                           e.total_marks * 100 >= 90
+                        THEN 'A+'
+
+                      WHEN er.marks_obtained /
+                           e.total_marks * 100 >= 80
+                        THEN 'A'
+
+                      WHEN er.marks_obtained /
+                           e.total_marks * 100 >= 70
+                        THEN 'B'
+
+                      WHEN er.marks_obtained /
+                           e.total_marks * 100 >= 60
+                        THEN 'C'
+
+                      WHEN er.marks_obtained /
+                           e.total_marks * 100 >= 50
+                        THEN 'D'
+
+                      ELSE 'F'
+
+                    END
+
+                    WHERE er.exam_id = ?
+                      AND er.status = 'Graded'
+                      AND er.marks_obtained IS NOT NULL
+                      AND e.total_marks > 0
                   `;
 
                   db.query(
-                    publishSql,
-                    [examId, teacherId],
-                    (publishErr, result) => {
-                      if (
-                        publishErr ||
-                        result.affectedRows !== 1
-                      ) {
+                    gradeSql,
+                    [examId],
+                    (gradeErr) => {
+                      if (gradeErr) {
+                        console.error(
+                          'Grade calculation:',
+                          gradeErr
+                        );
+
                         return fail(
                           500,
-                          'Could not publish results.'
+                          'Could not calculate grades.'
                         );
                       }
 
-                      db.commit((commitErr) => {
-                        if (commitErr) {
-                          return db.rollback(() => {
-                            res.status(500).json({
+                      /* ========== PUBLISH RESULTS ========== */
+
+                      const publishSql = `
+                        UPDATE exams
+                        SET result_published = 1
+                        WHERE id = ?
+                          AND teacher_id = ?
+                          AND result_published = 0
+                      `;
+
+                      db.query(
+                        publishSql,
+                        [examId, teacherId],
+                        (publishErr, result) => {
+                          if (
+                            publishErr ||
+                            result.affectedRows !== 1
+                          ) {
+                            console.error(
+                              'Publish results:',
+                              publishErr
+                            );
+
+                            return fail(
+                              500,
+                              'Could not publish results.'
+                            );
+                          }
+
+                          db.commit((commitErr) => {
+                            if (commitErr) {
+                              console.error(
+                                'Publication commit:',
+                                commitErr
+                              );
+
+                              return db.rollback(() => {
+                                res.status(500).json({
+                                  message:
+                                    'Could not commit results publication.'
+                                });
+                              });
+                            }
+
+                            return res.json({
                               message:
-                                'Could not commit results publication.'
+                                'Results published successfully.',
+                              exam_id: examId,
+                              published: true
                             });
                           });
                         }
-
-                        return res.json({
-                          message:
-                            'Results published successfully.',
-                          exam_id: examId,
-                          published: true
-                        });
-                      });
+                      );
                     }
                   );
                 }
@@ -5401,6 +5507,351 @@ app.post(
   }
 );
 
+
+/* ========================================================
+   SMART LMS — AUTOMATIC EXAM EXPIRY & RESULT SYNC
+   Requires exam_results.source_attempt_id column.
+   Uses existing callback-style db.query connection.
+   ======================================================== */
+
+const automaticExamQuery = (sql, params = []) =>
+  new Promise((resolve, reject) => {
+    db.query(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows);
+    });
+  });
+
+let automaticExamWorkerRunning = false;
+
+/* ---------- FINALIZE ONE EXPIRED ATTEMPT ---------- */
+
+async function finalizeExpiredAttempt(attemptId) {
+  const rows = await automaticExamQuery(
+    `SELECT
+       a.id,
+       a.exam_id,
+       a.student_id,
+       a.status,
+       a.expires_at
+     FROM exam_attempts a
+     WHERE a.id = ?
+       AND a.status = 'InProgress'
+       AND a.expires_at <= NOW()
+     LIMIT 1`,
+    [attemptId]
+  );
+
+  if (!rows.length) return false;
+
+  const attempt = rows[0];
+
+  // Automatically grade saved MCQ and True/False answers.
+  // BINARY comparison matches existing exact-answer grading.
+  await automaticExamQuery(
+    `UPDATE exam_answers ans
+     JOIN exam_questions q
+       ON q.id = ans.question_id
+     SET
+       ans.marks_awarded = CASE
+         WHEN TRIM(COALESCE(ans.answer_text, '')) <> ''
+          AND BINARY TRIM(ans.answer_text)
+              = BINARY TRIM(COALESCE(q.correct_answer, ''))
+         THEN q.marks
+         ELSE 0
+       END,
+
+       ans.is_correct = CASE
+         WHEN TRIM(COALESCE(ans.answer_text, '')) <> ''
+          AND BINARY TRIM(ans.answer_text)
+              = BINARY TRIM(COALESCE(q.correct_answer, ''))
+         THEN 1
+         ELSE 0
+       END
+
+     WHERE ans.attempt_id = ?
+       AND q.exam_id = ?
+       AND q.question_type IN ('MCQ', 'TrueFalse')`,
+    [attemptId, attempt.exam_id]
+  );
+
+  // Unanswered Short Answers are worth zero.
+  // Answered Short Answers need instructor review.
+  const gradingRows = await automaticExamQuery(
+    `SELECT
+       COALESCE(
+         SUM(
+           CASE
+             WHEN q.question_type IN ('MCQ', 'TrueFalse')
+             THEN COALESCE(ans.marks_awarded, 0)
+             ELSE 0
+           END
+         ), 0
+       ) AS objective_score,
+
+       COALESCE(
+         SUM(
+           CASE
+             WHEN q.question_type = 'ShortAnswer'
+              AND TRIM(COALESCE(ans.answer_text, '')) <> ''
+             THEN 1
+             ELSE 0
+           END
+         ), 0
+       ) AS short_answers_to_review,
+
+       COUNT(q.id) AS question_count
+
+     FROM exam_questions q
+     LEFT JOIN exam_answers ans
+       ON ans.question_id = q.id
+      AND ans.attempt_id = ?
+
+     WHERE q.exam_id = ?`,
+    [attemptId, attempt.exam_id]
+  );
+
+  const grading = gradingRows[0];
+
+  if (!Number(grading.question_count)) {
+    console.error(
+      'Expired attempt has no questions:',
+      attemptId
+    );
+    return false;
+  }
+
+  const pendingManualReview =
+    Number(grading.short_answers_to_review) > 0;
+
+  const newStatus = pendingManualReview
+    ? 'PendingReview'
+    : 'Graded';
+
+  const score = Number(
+    Number(grading.objective_score || 0).toFixed(2)
+  );
+
+  // Conditional update ensures an already-submitted attempt
+  // is not finalized twice.
+  const result = await automaticExamQuery(
+    `UPDATE exam_attempts
+     SET
+       status = ?,
+       submitted_at = COALESCE(submitted_at, expires_at),
+       total_score = ?
+     WHERE id = ?
+       AND status = 'InProgress'
+       AND expires_at <= NOW()`,
+    [newStatus, score, attemptId]
+  );
+
+  if (result.affectedRows !== 1) return false;
+
+  console.log(
+    `[AUTO EXPIRE] Attempt ${attemptId} -> ${newStatus}, score ${score}`
+  );
+
+  return true;
+}
+
+/* ---------- SYNC LATEST GRADED ATTEMPT ---------- */
+
+async function syncLatestGradedResults() {
+  const latestGraded = await automaticExamQuery(
+    `SELECT
+       a.id AS attempt_id,
+       a.exam_id,
+       a.student_id,
+       a.total_score
+
+     FROM exam_attempts a
+
+     JOIN exams e
+       ON e.id = a.exam_id
+
+     WHERE a.status = 'Graded'
+       AND e.result_published = 0
+
+       AND NOT EXISTS (
+         SELECT 1
+         FROM exam_attempts newer
+         WHERE newer.exam_id = a.exam_id
+           AND newer.student_id = a.student_id
+           AND (
+             newer.attempt_number > a.attempt_number
+             OR (
+               newer.attempt_number = a.attempt_number
+               AND newer.id > a.id
+             )
+           )
+       )
+
+     ORDER BY a.id DESC
+     LIMIT 100`
+  );
+
+  for (const attempt of latestGraded) {
+    const attemptId = Number(attempt.attempt_id);
+    const examId = Number(attempt.exam_id);
+    const studentId = Number(attempt.student_id);
+    const score = Number(attempt.total_score || 0);
+
+    const existing = await automaticExamQuery(
+      `SELECT
+         id,
+         marks_obtained,
+         source_attempt_id
+       FROM exam_results
+       WHERE exam_id = ?
+         AND student_id = ?
+       ORDER BY id DESC
+       LIMIT 1`,
+      [examId, studentId]
+    );
+
+    if (!existing.length) {
+      await automaticExamQuery(
+        `INSERT INTO exam_results (
+           exam_id,
+           student_id,
+           marks_obtained,
+           grade,
+           feedback,
+           status,
+           source_attempt_id
+         )
+         SELECT ?, ?, ?, NULL, NULL, 'Graded', ?
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM exam_results
+           WHERE exam_id = ?
+             AND student_id = ?
+         )`,
+        [
+          examId,
+          studentId,
+          score,
+          attemptId,
+          examId,
+          studentId
+        ]
+      );
+
+      continue;
+    }
+
+    const previous = existing[0];
+    const sameAttempt =
+      Number(previous.source_attempt_id) === attemptId;
+
+    const sameScore =
+      Math.abs(
+        Number(previous.marks_obtained || 0) - score
+      ) < 0.001;
+
+    if (sameAttempt && sameScore) {
+      continue;
+    }
+
+    // If only the source tracking was missing and marks are
+    // already correct, preserve existing feedback.
+    if (sameScore && previous.source_attempt_id == null) {
+      await automaticExamQuery(
+        `UPDATE exam_results
+         SET source_attempt_id = ?,
+             status = 'Graded'
+         WHERE id = ?`,
+        [attemptId, previous.id]
+      );
+
+      continue;
+    }
+
+    if (sameAttempt) {
+      // Same attempt was regraded: preserve instructor feedback.
+      await automaticExamQuery(
+        `UPDATE exam_results
+         SET marks_obtained = ?,
+             grade = NULL,
+             status = 'Graded'
+         WHERE id = ?`,
+        [score, previous.id]
+      );
+    } else {
+      // Different attempt: previous feedback must not carry
+      // into the student's new result.
+      await automaticExamQuery(
+        `UPDATE exam_results
+         SET marks_obtained = ?,
+             grade = NULL,
+             feedback = NULL,
+             status = 'Graded',
+             source_attempt_id = ?
+         WHERE id = ?`,
+        [
+          score,
+          attemptId,
+          previous.id
+        ]
+      );
+    }
+
+    console.log(
+      `[RESULT SYNC] Exam ${examId}, Student ${studentId}, Attempt ${attemptId}`
+    );
+  }
+}
+
+/* ---------- BACKGROUND WORKER ---------- */
+
+async function processExpiredExams() {
+  if (automaticExamWorkerRunning) return;
+
+  automaticExamWorkerRunning = true;
+
+  try {
+    const expired = await automaticExamQuery(
+      `SELECT id
+       FROM exam_attempts
+       WHERE status = 'InProgress'
+         AND expires_at <= NOW()
+       ORDER BY expires_at ASC
+       LIMIT 50`
+    );
+
+    for (const attempt of expired) {
+      try {
+        await finalizeExpiredAttempt(attempt.id);
+      } catch (err) {
+        console.error(
+          'Automatic expiry failed for attempt',
+          attempt.id,
+          err
+        );
+      }
+    }
+
+    await syncLatestGradedResults();
+
+  } catch (err) {
+    console.error('Automatic exam worker error:', err);
+
+  } finally {
+    automaticExamWorkerRunning = false;
+  }
+}
+
+/* ---------- RUN PERIODICALLY ---------- */
+
+// Runs after server starts, then approximately every 15 seconds.
+setInterval(() => {
+  void processExpiredExams();
+}, 15000);
+
+setTimeout(() => {
+  void processExpiredExams();
+}, 3000);
 
 // START SERVER
 const PORT = process.env.PORT || 5000;
