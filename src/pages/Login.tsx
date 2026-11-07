@@ -2,8 +2,7 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate, Link } from "react-router-dom";
-
-const API = "http://localhost:5000";
+import { apiFetch } from "../services/api";
 
 function Login() {
   const navigate = useNavigate();
@@ -19,15 +18,15 @@ function Login() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API}/api/login`, {
+      const response = await apiFetch("/api/login", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
         },
         body: JSON.stringify({
           email: email.trim().toLowerCase(),
-          password
-        })
+          password,
+        }),
       });
 
       const data = await response.json();
@@ -35,7 +34,9 @@ function Login() {
       if (!response.ok) {
         if (data.verification_required) {
           navigate(
-            `/verify-email?email=${encodeURIComponent(data.email || email)}`
+            `/verify-email?email=${encodeURIComponent(
+              data.email || email.trim().toLowerCase()
+            )}`
           );
           return;
         }
@@ -53,22 +54,24 @@ function Login() {
       }
 
       // Compatibility with existing LMS components.
-      localStorage.setItem("user", JSON.stringify({
-        id: data.id,
-        name: data.name,
-        email: data.email,
-        role: data.role,
-        token: data.token
-      }));
+      localStorage.setItem(
+        "user",
+        JSON.stringify({
+          id: data.id,
+          name: data.name,
+          email: data.email,
+          role: data.role,
+          token: data.token,
+        })
+      );
 
       const destinations: Record<string, string> = {
         admin: "/admin-dashboard",
         student: "/student-dashboard",
-        instructor: "/instructor-dashboard"
+        instructor: "/instructor-dashboard",
       };
 
       navigate(destinations[data.role], { replace: true });
-
     } catch (err) {
       setError(
         err instanceof Error
@@ -101,7 +104,10 @@ function Login() {
           </p>
 
           {error && (
-            <div className="mt-5 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-600">
+            <div
+              role="alert"
+              className="mt-5 rounded-lg bg-red-50 border border-red-200 p-3 text-sm text-red-600"
+            >
               {error}
             </div>
           )}
@@ -111,32 +117,42 @@ function Login() {
             className="mt-6 space-y-5"
           >
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
+              <label
+                htmlFor="login-email"
+                className="block text-sm font-medium text-slate-700 mb-2"
+              >
                 Email Address
               </label>
 
               <input
+                id="login-email"
+                name="email"
                 type="email"
                 autoComplete="email"
                 required
                 value={email}
-                onChange={e => setEmail(e.target.value)}
+                onChange={(e) => setEmail(e.target.value)}
                 placeholder="Enter your email"
                 className="w-full rounded-lg border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
+              <label
+                htmlFor="login-password"
+                className="block text-sm font-medium text-slate-700 mb-2"
+              >
                 Password
               </label>
 
               <input
+                id="login-password"
+                name="password"
                 type="password"
                 autoComplete="current-password"
                 required
                 value={password}
-                onChange={e => setPassword(e.target.value)}
+                onChange={(e) => setPassword(e.target.value)}
                 placeholder="Enter your password"
                 className="w-full rounded-lg border border-slate-300 px-4 py-3 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
               />
