@@ -74,9 +74,15 @@ app.use("/api/auth/verify-email", otpLimiter);
 
 
 // PAYMENT RECEIPT UPLOAD CONFIGURATION
-const receiptDirectory = path.join(__dirname, 'uploads', 'receipts');
 
-fs.mkdirSync(receiptDirectory, { recursive: true });
+const receiptDirectory = process.env.VERCEL
+  ? path.join("/tmp", "campus95", "receipts")
+  : path.join(__dirname, "uploads", "receipts");
+
+fs.mkdirSync(receiptDirectory, {
+  recursive: true,
+});
+
 
 const receiptStorage = multer.diskStorage({
   destination: (req, file, cb) => {
