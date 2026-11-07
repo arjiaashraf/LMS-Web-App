@@ -52,7 +52,7 @@ function StudentOnlineClasses() {
 
   const fetchStudentClasses = async (id: number) => {
     try {
-      const res = await fetch(`http://localhost:5000/api/student/class-schedules/${id}`);
+      const res = await fetch(`/api/student/class-schedules/${id}`);
       const data = await res.json();
       if (res.ok) {
         setClasses(data);

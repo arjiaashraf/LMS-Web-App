@@ -19,7 +19,6 @@ import {
   Send,
 } from "lucide-react";
 
-const API_BASE = "http://localhost:5000";
 
 // MySQL DATE must be provided by the API as YYYY-MM-DD (not an ISO timestamp).
 // Avoid converting date-only values through new Date(), which can shift days.
@@ -216,7 +215,7 @@ const [assignmentMarksError, setAssignmentMarksError] =
   const fetchInstructorCourses = async () => {
     try {
       const response = await fetch(
-        `${API_BASE}/api/teacher/courses/${teacherId}`
+        `/api/teacher/courses/${teacherId}`
       );
 
       const data = await response.json();
@@ -234,7 +233,7 @@ const [assignmentMarksError, setAssignmentMarksError] =
   const fetchInstructorExams = async () => {
     try {
       const response = await fetch(
-        `${API_BASE}/api/teacher/exams/${teacherId}`
+        `/api/teacher/exams/${teacherId}`
       );
 
       const data = await response.json();
@@ -261,7 +260,7 @@ const [assignmentMarksError, setAssignmentMarksError] =
 
     try {
       const response = await fetch(
-        `${API_BASE}/api/teacher/exams`,
+        `/api/teacher/exams`,
         {
           method: "POST",
           headers: {
@@ -318,7 +317,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
 
   try {
     const response = await fetch(
-      `${API_BASE}/api/teacher/batches/${batchId}/assignment-marks/${teacherId}`
+      `/api/teacher/batches/${batchId}/assignment-marks/${teacherId}`
     );
 
     const data = await response.json();
@@ -356,7 +355,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
 
     try {
       const response = await fetch(
-        `${API_BASE}/api/teacher/exam-results/${exam.id}/${teacherId}`
+        `/api/teacher/exam-results/${exam.id}/${teacherId}`
       );
 
       const data = await response.json();
@@ -423,7 +422,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
     setSavingFeedbackId(student.student_id);
     try {
       const response = await fetch(
-        `${API_BASE}/api/teacher/exam-results/${selectedExam.id}/${student.student_id}/feedback`,
+        `/api/teacher/exam-results/${selectedExam.id}/${student.student_id}/feedback`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -458,7 +457,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
     setPublishingResults(true);
     try {
       const response = await fetch(
-        `${API_BASE}/api/teacher/exams/${selectedExam.id}/publish-results`,
+        `/api/teacher/exams/${selectedExam.id}/publish-results`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -487,7 +486,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
 
     try {
       const response = await fetch(
-        `${API_BASE}/api/teacher/exam-questions/${examId}/${teacherId}`
+        `/api/teacher/exam-questions/${examId}/${teacherId}`
       );
 
       const data = await response.json();
@@ -639,7 +638,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
 
     try {
       const response = await fetch(
-        `${API_BASE}/api/teacher/exam-questions`,
+        `/api/teacher/exam-questions`,
         {
           method: "POST",
           headers: {
@@ -706,7 +705,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
     setRescheduleError("");
     try {
       const response = await fetch(
-        `${API_BASE}/api/teacher/exams/${rescheduleExam.id}/reschedule`,
+        `/api/teacher/exams/${rescheduleExam.id}/reschedule`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -764,7 +763,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
 
     try {
       const response = await fetch(
-        `${API_BASE}/api/teacher/exams/${settingsExam.id}/settings`,
+        `/api/teacher/exams/${settingsExam.id}/settings`,
         {
           method: "PUT",
           headers: {
@@ -819,7 +818,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
 
     try {
       const response = await fetch(
-        `${API_BASE}/api/teacher/exams/${exam.id}/publish`,
+        `/api/teacher/exams/${exam.id}/publish`,
         {
           method: "PUT",
           headers: {

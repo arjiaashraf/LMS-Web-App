@@ -53,7 +53,7 @@ function StudentProfile() {
 
   const fetchStudentProfile = async (id: number) => {
     try {
-      const response = await fetch(`http://localhost:5000/api/student/${id}`);
+      const response = await fetch(`/api/student/${id}`);
       const data = await response.json();
       if (response.ok) {
         setProfile({
@@ -90,7 +90,7 @@ function StudentProfile() {
     if (!studentId) return;
 
     try {
-      const response = await fetch(`http://localhost:5000/api/student/update-profile/${studentId}`, {
+      const response = await fetch(`/api/student/update-profile/${studentId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(profile),

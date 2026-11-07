@@ -41,7 +41,7 @@ function StudentAttendance() {
 
   const fetchStudentAttendance = async (studentId: number) => {
     try {
-      const res = await fetch(`http://localhost:5000/api/student/attendance/${studentId}`);
+      const res = await fetch(`/api/student/attendance/${studentId}`);
       const data = await res.json();
       if (res.ok) {
         setAttendance(data.courses || []);

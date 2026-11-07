@@ -63,7 +63,7 @@ function StudentAssignments() {
 
   const fetchStudentAssignments = async (id: number) => {
     try {
-      const res = await fetch(`http://localhost:5000/api/student/assignments/${id}`);
+      const res = await fetch(`/api/student/assignments/${id}`);
       const data = await res.json();
       if (res.ok) {
         setAssignments(data);
@@ -90,7 +90,7 @@ function StudentAssignments() {
     if (!selectedAssignment || !studentId) return;
 
     try {
-      const res = await fetch("http://localhost:5000/api/student/submit-assignment", {
+      const res = await fetch("/api/student/submit-assignment", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

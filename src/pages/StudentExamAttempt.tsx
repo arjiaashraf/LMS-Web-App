@@ -15,8 +15,6 @@ import {
 } from "lucide-react";
 import { apiFetch as fetch } from "../services/api";
 
-const API_BASE = "http://localhost:5000";
-
 type QuestionType = "MCQ" | "TrueFalse" | "ShortAnswer";
 
 type Question = {
@@ -163,7 +161,7 @@ export default function StudentExamAttempt() {
 
       try {
         const response = await fetch(
-          `${API_BASE}/api/student/exam-attempts/${id}?student_id=${studentId}`,
+          `/api/student/exam-attempts/${id}?student_id=${studentId}`,
           { signal: controller.signal }
         );
 
@@ -288,7 +286,7 @@ export default function StudentExamAttempt() {
 
       try {
         const response = await fetch(
-          `${API_BASE}/api/student/exam-attempts/${id}/answers`,
+          `/api/student/exam-attempts/${id}/answers`,
           {
             method: "PUT",
             headers: {
@@ -388,7 +386,7 @@ export default function StudentExamAttempt() {
     }
 
     const response = await fetch(
-      `${API_BASE}/api/student/exam-attempts/${id}/answers`,
+      `/api/student/exam-attempts/${id}/answers`,
       {
         method: "PUT",
         headers: {
@@ -474,7 +472,7 @@ export default function StudentExamAttempt() {
       }
 
       const response = await fetch(
-        `${API_BASE}/api/student/exam-attempts/${id}/submit`,
+        `/api/student/exam-attempts/${id}/submit`,
         {
           method: "POST",
           headers: {

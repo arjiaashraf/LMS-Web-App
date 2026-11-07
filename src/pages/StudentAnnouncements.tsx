@@ -19,7 +19,6 @@ import {
   CalendarClock,
 } from "lucide-react";
 
-const API_BASE = "http://localhost:5000";
 
 type ExamFilter = "all" | "upcoming" | "results";
 
@@ -268,11 +267,11 @@ export default function StudentExams() {
 
       try {
         const examsUrl =
-          `${API_BASE}/api/student/exams/${studentId}` +
+          `/api/student/exams/${studentId}` +
           `?page=${page}&limit=10&filter=${filter}`;
 
         const statusesUrl =
-          `${API_BASE}/api/student/exam-attempt-statuses/${studentId}`;
+          `/api/student/exam-attempt-statuses/${studentId}`;
 
         const [examResponse, statusResponse] =
           await Promise.all([
@@ -555,7 +554,7 @@ if (now < start) {
 
     try {
       const response = await fetch(
-        `${API_BASE}/api/student/exams/${exam.id}/start`,
+        `/api/student/exams/${exam.id}/start`,
         {
           method: "POST",
           headers: {

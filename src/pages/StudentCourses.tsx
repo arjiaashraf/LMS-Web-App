@@ -81,7 +81,7 @@ function StudentCourses() {
 
   const fetchPublishedCourses = async () => {
   try {
-    const res = await fetch("http://localhost:5000/api/student/courses");
+    const res = await fetch("/api/student/courses");
     const data = await res.json();
 
     if (!res.ok) {
@@ -102,7 +102,7 @@ function StudentCourses() {
 
   const fetchEnrolledBatches = async (id: number) => {
     try {
-      const res = await fetch(`http://localhost:5000/api/student/enrolled-batches/${id}`);
+      const res = await fetch(`/api/student/enrolled-batches/${id}`);
       const data = await res.json();
       if (res.ok) setEnrolledBatches(data);
     } catch (err) {
@@ -120,7 +120,7 @@ function StudentCourses() {
     setSelectedCourse(course);
     setShowBatchModal(true);
     try {
-      const res = await fetch(`http://localhost:5000/api/course-batches/${course.id}`);
+      const res = await fetch(`/api/course-batches/${course.id}`);
       const data = await res.json();
       if (res.ok) setBatches(data);
     } catch (err) {
@@ -165,7 +165,7 @@ const handleEnrollSubmit = async (e: React.FormEvent) => {
 
   try {
     const res = await fetch(
-      "http://localhost:5000/api/student/enroll-batch",
+      "/api/student/enroll-batch",
       {
         method: "POST",
         body: formData
@@ -199,7 +199,7 @@ const handleEnrollSubmit = async (e: React.FormEvent) => {
 
   const fetchPaymentSettings = async () => {
   try {
-    const res = await fetch("http://localhost:5000/api/payment-settings");
+    const res = await fetch("/api/payment-settings");
     const data = await res.json();
 
     if (!res.ok) {

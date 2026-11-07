@@ -38,7 +38,7 @@ function InstructorCourses({ teacherId }: InstructorCoursesProps) {
 
   const fetchInstructorBatches = async (id: number) => {
     try {
-      const res = await fetch(`http://localhost:5000/api/instructor/batches/${id}`);
+      const res = await fetch(`/api/instructor/batches/${id}`);
       const data = await res.json();
       if (res.ok) setAssignedBatches(data);
     } catch (err) {
@@ -61,7 +61,7 @@ function InstructorCourses({ teacherId }: InstructorCoursesProps) {
     setSelectedBatchTitle(title);
     setShowRosterModal(true);
     try {
-      const res = await fetch(`http://localhost:5000/api/instructor/batch-students/${batchId}`);
+      const res = await fetch(`/api/instructor/batch-students/${batchId}`);
       const data = await res.json();
       if (res.ok) setRosterStudents(data);
     } catch (err) {
@@ -74,7 +74,7 @@ function InstructorCourses({ teacherId }: InstructorCoursesProps) {
     if (!teacherId) return;
 
     try {
-      const res = await fetch("http://localhost:5000/api/instructor/propose-course", {
+      const res = await fetch("/api/instructor/propose-course", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...proposal, instructor_id: teacherId })

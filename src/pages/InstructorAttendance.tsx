@@ -56,7 +56,7 @@ function InstructorAttendance({ onBack }: InstructorAttendanceProps) {
 const fetchTeacherSessions = async () => {
   try {
     const res = await fetch(
-      `http://localhost:5000/api/teacher/class-schedules/${teacherUser.id}`
+      `/api/teacher/class-schedules/${teacherUser.id}`
     );
 
     if (!res.ok) {
@@ -86,7 +86,7 @@ const handleSelectSession = async (session: ClassSession) => {
 
     // Fetch students of the selected batch
     const studentsRes = await fetch(
-      `http://localhost:5000/api/admin/class-batch-students/${session.course_batch_id}`
+      `/api/admin/class-batch-students/${session.course_batch_id}`
     );
 
     if (!studentsRes.ok) {
@@ -97,7 +97,7 @@ const handleSelectSession = async (session: ClassSession) => {
 
     // Fetch previously saved attendance
     const attendanceRes = await fetch(
-      `http://localhost:5000/api/teacher/attendance/${session.id}`
+      `/api/teacher/attendance/${session.id}`
     );
 
     let attendanceData: {
@@ -151,7 +151,7 @@ const handleSelectSession = async (session: ClassSession) => {
 
     setSubmitting(true);
     try {
-      const res = await fetch("http://localhost:5000/api/teacher/attendance", {
+      const res = await fetch("/api/teacher/attendance", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

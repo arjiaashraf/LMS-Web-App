@@ -47,7 +47,7 @@ function Students() {
 
   const fetchStudents = async () => {
     try {
-      const response = await fetch("http://localhost:5000/api/students");
+      const response = await fetch("/api/students");
       const data = await response.json();
       if (response.ok) {
         setStudents(data);
@@ -63,7 +63,7 @@ function Students() {
     const confirmed = window.confirm("Are you sure you want to delete this student?");
     if (confirmed) {
       try {
-        const response = await fetch(`http://localhost:5000/api/admin/delete-user/${databaseId}`, {
+        const response = await fetch(`/api/admin/delete-user/${databaseId}`, {
           method: "DELETE",
         });
         const data = await response.json();
@@ -84,7 +84,7 @@ function Students() {
     if (!selectedStudent) return;
 
     try {
-      const response = await fetch(`http://localhost:5000/api/admin/update-student/${selectedStudent.databaseId}`, {
+      const response = await fetch(`/api/admin/update-student/${selectedStudent.databaseId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(selectedStudent),

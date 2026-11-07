@@ -9,7 +9,6 @@ import {
   RefreshCw,
 } from "lucide-react";
 
-const API = "http://localhost:5000";
 
 type Student = {
   student_id: number;
@@ -74,7 +73,7 @@ export default function InstructorExamExtensions() {
 
     try {
       const response = await fetch(
-        `${API}/api/teacher/exams/${examId}/extensions/${teacherId}`
+        `/api/teacher/exams/${examId}/extensions/${teacherId}`
       );
 
       const data = await response.json();
@@ -134,7 +133,7 @@ export default function InstructorExamExtensions() {
 
     try {
       const response = await fetch(
-        `${API}/api/teacher/exams/${examId}/extensions/${selected.student_id}`,
+        `/api/teacher/exams/${examId}/extensions/${selected.student_id}`,
         {
           method: "PUT",
           headers: {
