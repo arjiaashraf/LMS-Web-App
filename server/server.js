@@ -138,12 +138,17 @@ const db = mysql.createPool({
 
 
 
-db.connect((err) => {
+db.getConnection((err, connection) => {
   if (err) {
-    console.error('Database connection failed:', err);
+    console.error("Database connection failed:", {
+      code: err.code,
+      message: err.message,
+    });
     return;
   }
-  console.log('Connected to MySQL database: lms_database');
+
+  console.log("Database connection successful");
+  connection.release();
 });
 
 
