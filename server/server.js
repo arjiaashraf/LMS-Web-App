@@ -8940,14 +8940,20 @@ async function processExpiredExams() {
 
 /* ---------- RUN PERIODICALLY ---------- */
 
-// Runs after server starts, then approximately every 15 seconds.
-setInterval(() => {
-  void processExpiredExams();
-}, 15000);
+/* ---------- RUN PERIODICALLY ---------- */
 
-setTimeout(() => {
-  void processExpiredExams();
-}, 3000);
+// Local server par worker chalega.
+// Vercel par background timers disable rahenge.
+
+if (!process.env.VERCEL) {
+  setInterval(() => {
+    void processExpiredExams();
+  }, 15000);
+
+  setTimeout(() => {
+    void processExpiredExams();
+  }, 3000);
+}
 
 
 /* =====================================================
