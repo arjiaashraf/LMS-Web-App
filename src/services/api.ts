@@ -3,7 +3,7 @@
    CAMPUS 95 — CENTRAL AUTHENTICATED API CLIENT
    ===================================================== */
 
-const API_URL = "http://localhost:5000";
+const API_URL = (import.meta.env.VITE_API_URL || "http://localhost:5000").replace(/\/+$/, "") + "/";
 
 export const apiFetch = async (
   endpoint: string,
