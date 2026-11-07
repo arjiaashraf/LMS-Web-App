@@ -7,6 +7,7 @@ import {
   ArrowLeft,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
+import { apiFetch as fetch } from "../services/api";
 
 type CourseAttendance = {
   course: string;

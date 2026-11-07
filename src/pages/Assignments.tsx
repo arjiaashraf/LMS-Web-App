@@ -1,3 +1,4 @@
+import { apiFetch } from "../services/api";
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -37,6 +38,8 @@ type SubmissionDetail = {
 function AdminAssignments() {
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [submissionsError, setSubmissionsError] = useState("");
   
   // Submissions Modal States
   const [selectedAssignment, setSelectedAssignment] = useState<Assignment | null>(null);
@@ -55,28 +58,33 @@ function AdminAssignments() {
   }, [navigate]);
 
   const fetchAdminAssignments = async () => {
+    setLoadError("");
     try {
-      const res = await fetch("http://localhost:5000/api/admin/assignments");
+      const res = await apiFetch("/api/admin/assignments");
       const data = await res.json();
-      if (res.ok) {
-        setAssignments(data);
-      }
+      if (!res.ok) throw new Error(data.message || `Assignments API error (${res.status})`);
+      if (!Array.isArray(data)) throw new Error("Invalid assignments response.");
+      setAssignments(data);
     } catch (err) {
       console.error("Error fetching admin assignments:", err);
+      setLoadError(err instanceof Error ? err.message : "Unable to load assignments.");
     }
   };
 
   const handleViewSubmissions = async (assignment: Assignment) => {
     setSelectedAssignment(assignment);
     setShowSubmissionsModal(true);
+    setSubmissions([]);
+    setSubmissionsError("");
     try {
-      const res = await fetch(`http://localhost:5000/api/admin/assignment-submissions/${assignment.id}`);
+      const res = await apiFetch(`/api/admin/assignment-submissions/${assignment.id}`);
       const data = await res.json();
-      if (res.ok) {
-        setSubmissions(data);
-      }
+      if (!res.ok) throw new Error(data.message || `Submissions API error (${res.status})`);
+      if (!Array.isArray(data)) throw new Error("Invalid submissions response.");
+      setSubmissions(data);
     } catch (err) {
       console.error("Error fetching assignment submissions:", err);
+      setSubmissionsError(err instanceof Error ? err.message : "Unable to load submissions.");
     }
   };
 
@@ -148,6 +156,7 @@ function AdminAssignments() {
             </div>
           </div>
 
+          {loadError && <p role="alert" className="px-6 py-4 text-red-600">{loadError}</p>}
           {/* TABLE */}
           <div className="overflow-x-auto">
             <table className="w-full">
@@ -231,7 +240,9 @@ function AdminAssignments() {
             </div>
 
             <div className="overflow-y-auto flex-1 space-y-4 pr-1">
-              {submissions.length === 0 ? (
+              {submissionsError ? (
+                <p role="alert" className="bg-red-50 p-3 rounded-lg text-red-700">{submissionsError}</p>
+              ) : submissions.length === 0 ? (
                 <p className="text-center py-10 text-slate-500">No students enrolled or no data found for this course.</p>
               ) : (
                 submissions.map((sub, index) => (

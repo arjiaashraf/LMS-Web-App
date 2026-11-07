@@ -2,6 +2,7 @@
 import { useState, useEffect } from "react";
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
+import { apiFetch as fetch } from "../services/api";
 import {
   ClipboardList,
   Plus,
@@ -10,7 +11,6 @@ import {
   ArrowLeft,
   X,
   BookOpen,
-  Save,
   CheckCircle,
   Clock,
   ListChecks,
@@ -46,7 +46,7 @@ type Exam = {
   total_marks: number;
   exam_date: string;
   exam_status: "Draft" | "Published";
-  exam_mode: "Online" | "Offline";
+  exam_mode: "Online" | "Offline"; // Legacy DB records are excluded from this online UI.
   start_time: string | null;
   duration_minutes: number | null;
   attempt_limit: number;
@@ -136,7 +136,6 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
   const [showModal, setShowModal] = useState(false);
   const [showMarksSelector, setShowMarksSelector] = useState(false);
   const [loadingResults, setLoadingResults] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
   const [savingFeedbackId, setSavingFeedbackId] = useState<number | null>(null);
   const [publishingResults, setPublishingResults] = useState(false);
   const [savedFeedback, setSavedFeedback] = useState<Record<number, string>>({});
@@ -180,8 +179,6 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
 
   const [settingsExam, setSettingsExam] = useState<Exam | null>(null);
 
-  const [examMode, setExamMode] =
-    useState<"Online" | "Offline">("Online");
 
   const [durationMinutes, setDurationMinutes] = useState("60");
   const [startTime, setStartTime] = useState("09:00");
@@ -243,7 +240,7 @@ const [assignmentMarksError, setAssignmentMarksError] =
       const data = await response.json();
 
       if (response.ok && Array.isArray(data)) {
-        setExams(data);
+        setExams(data.filter((exam: Exam) => exam.exam_mode === "Online"));
       }
     } catch (error) {
       console.error("Fetch exams error:", error);
@@ -447,10 +444,10 @@ const fetchAssignmentMarks = async (batchId?: number) => {
   // ========== PUBLISH FINAL RESULTS ==========
 
   const handlePublishResults = async () => {
-    if (!selectedExam || publishingResults || submitting || savingFeedbackId !== null ||
+    if (!selectedExam || publishingResults || savingFeedbackId !== null ||
         selectedExam.result_published === 1) return;
 
-    if (selectedExam.exam_mode === "Online" && studentResults.some(student =>
+    if (studentResults.some(student =>
       student.status === "Graded" && (student.feedback || "") !== (savedFeedback[student.student_id] || "")
     )) {
       alert("Please save all changed feedback before publishing results.");
@@ -479,92 +476,6 @@ const fetchAssignmentMarks = async (batchId?: number) => {
       alert(error instanceof Error ? error.message : "Failed to publish results.");
     } finally {
       setPublishingResults(false);
-    }
-  };
-
-  // ========== SAVE RESULTS ==========
-
-  const handleSaveResults = async () => {
-    if (!selectedExam || submitting) return;
-    // Online examination scores come from submitted exam attempts.
-    // Do not let this manual-entry workflow overwrite automatic grades.
-    if (selectedExam.exam_mode !== "Offline") {
-      alert("Online exam marks are saved automatically after answer review.");
-      return;
-    }
-
-    const invalidMarks = studentResults.some((student) => {
-      if (
-        student.marks_obtained === null ||
-        student.marks_obtained === ""
-      ) {
-        return false;
-      }
-
-      const marks = Number(student.marks_obtained);
-
-      return (
-        !Number.isFinite(marks) ||
-        marks < 0 ||
-        marks > selectedExam.total_marks
-      );
-    });
-
-    if (invalidMarks) {
-      alert(
-        `Marks must be between 0 and ${selectedExam.total_marks}.`
-      );
-      return;
-    }
-
-    const payloadResults = studentResults.map((student) => ({
-      student_id: student.student_id,
-      marks_obtained:
-        student.marks_obtained !== null &&
-        student.marks_obtained !== ""
-          ? Number(student.marks_obtained)
-          : null,
-      grade: student.marks_obtained === null || student.marks_obtained === ""
-        ? "" : calculateGrade(student.marks_obtained, selectedExam.total_marks),
-      feedback: student.feedback || "",
-    }));
-
-    setSubmitting(true);
-
-    try {
-      const response = await fetch(
-        `${API_BASE}/api/teacher/exam-results`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            exam_id: selectedExam.id,
-            teacher_id: teacherId,
-            results_data: payloadResults,
-          }),
-        }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(
-          data.message || "Failed to save results."
-        );
-      }
-
-      alert("Exam results saved successfully!");
-      await handleSelectExam(selectedExam);
-    } catch (error) {
-      alert(
-        error instanceof Error
-          ? error.message
-          : "Failed to save results."
-      );
-    } finally {
-      setSubmitting(false);
     }
   };
 
@@ -826,7 +737,6 @@ const fetchAssignmentMarks = async (batchId?: number) => {
   const openExamSettings = (exam: Exam) => {
     setSettingsExam(exam);
 
-    setExamMode(exam.exam_mode || "Online");
     setDurationMinutes(
       String(exam.duration_minutes || 60)
     );
@@ -862,15 +772,9 @@ const fetchAssignmentMarks = async (batchId?: number) => {
           },
           body: JSON.stringify({
             teacher_id: teacherId,
-            exam_mode: examMode,
-            duration_minutes:
-              examMode === "Online"
-                ? Number(durationMinutes)
-                : null,
-            start_time:
-              examMode === "Online"
-                ? startTime
-                : null,
+            exam_mode: "Online",
+            duration_minutes: Number(durationMinutes),
+            start_time: startTime,
             attempt_limit: Number(attemptLimit),
           }),
         }
@@ -1091,11 +995,11 @@ const fetchAssignmentMarks = async (batchId?: number) => {
                       />
                       Mode:
                       <strong>
-                        {exam.exam_mode || "Offline"}
+                        Online
                       </strong>
                     </p>
 
-                    {exam.exam_mode === "Online" && (
+                    {(
                       <>
                         <p className="text-sm">
                           Duration:{" "}
@@ -1237,7 +1141,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
           <div className="flex justify-between items-center border-b pb-4">
             <div>
               <h2 className="text-lg font-bold text-slate-800">
-                Student Results Entry
+                Online Exam Results & Feedback
               </h2>
 
               <p className="text-xs text-slate-500 mt-1">
@@ -1278,9 +1182,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
                       </th>
                       <th className="p-3">Grade</th>
                       <th className="p-3">Feedback</th>
-                      {selectedExam.exam_mode === "Online" && (
-                        <th className="p-3">Action</th>
-                      )}
+                      <th className="p-3">Action</th>
                       <th className="p-3">Status</th>
                     </tr>
                   </thead>
@@ -1307,18 +1209,11 @@ const fetchAssignmentMarks = async (batchId?: number) => {
                             min={0}
                             max={selectedExam.total_marks}
                             step="0.01"
-                            readOnly={selectedExam.exam_mode === "Online" || selectedExam.result_published === 1}
+                            readOnly
                             value={
                               student.marks_obtained !== null
                                 ? student.marks_obtained
                                 : ""
-                            }
-                            onChange={(e) =>
-                              handleResultChange(
-                                student.student_id,
-                                "marks_obtained",
-                                e.target.value
-                              )
                             }
                             className="w-28 border rounded-lg px-2.5 py-1.5 text-sm outline-none focus:border-purple-500"
                             placeholder="Marks"
@@ -1338,8 +1233,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
                         <td className="p-3">
                           <input
                             type="text"
-                            readOnly={selectedExam.result_published === 1 ||
-                              (selectedExam.exam_mode === "Online" && student.status !== "Graded")}
+                            readOnly={selectedExam.result_published === 1 || student.status !== "Graded"}
                             maxLength={2000}
                             value={student.feedback || ""}
                             onChange={(e) =>
@@ -1354,7 +1248,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
                           />
                         </td>
 
-                        {selectedExam.exam_mode === "Online" && (
+                        {(
                           <td className="p-3">
                             {student.status === "Graded" && selectedExam.result_published !== 1 ? (
                               <button
@@ -1478,22 +1372,10 @@ const fetchAssignmentMarks = async (batchId?: number) => {
 </section>
 
               <div className="flex justify-end pt-4 border-t">
-                {selectedExam.exam_mode === "Offline" ? (
-                  <button
-                    type="button"
-                    onClick={handleSaveResults}
-                    disabled={submitting || selectedExam.result_published === 1}
-                    className="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white px-6 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2"
-                  >
-                    <Save size={16} />
-                    {submitting ? "Saving..." : "Save All Results"}
-                  </button>
-                ) : (
-                  <p className="text-sm text-green-700 font-medium">
-                    Online exam marks are saved automatically after grading.
-                    Review student answers to finalize marks.
-                  </p>
-                )}
+                <p className="text-sm text-green-700 font-medium">
+                  Online exam marks are saved after automatic grading and
+                  instructor review. Review student answers to finalize marks.
+                </p>
               </div>
               <div className="flex flex-wrap items-center justify-between gap-3 pt-4 border-t">
                 <span className="text-sm text-slate-600">
@@ -1504,7 +1386,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
                 <button
                   type="button"
                   onClick={() => void handlePublishResults()}
-                  disabled={publishingResults || submitting || savingFeedbackId !== null ||
+                  disabled={publishingResults || savingFeedbackId !== null ||
                     selectedExam.result_published === 1 || !studentResults.some(s => s.status === "Graded")}
                   className="bg-green-600 hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white px-5 py-2.5 rounded-lg text-sm font-semibold"
                 >
@@ -1561,7 +1443,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
                       </span>
                     </div>
                     <p className="text-xs text-slate-500 mt-3">
-                      Total Marks: {exam.total_marks} · {exam.exam_mode}
+                      Total Marks: {exam.total_marks} · Online
                     </p>
                   </button>
                 ))}
@@ -2076,36 +1958,11 @@ const fetchAssignmentMarks = async (batchId?: number) => {
               onSubmit={handleSaveExamSettings}
               className="space-y-5"
             >
-              {/* EXAM MODE */}
-
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-2">
-                  Exam Mode
-                </label>
-
-                <select
-                  value={examMode}
-                  onChange={(e) =>
-                    setExamMode(
-                      e.target.value as "Online" | "Offline"
-                    )
-                  }
-                  className="w-full border rounded-lg p-3"
-                >
-                  <option value="Online">
-                    Online Examination
-                  </option>
-                  <option value="Offline">
-                    Offline Examination
-                  </option>
-                </select>
+              <div className="rounded-lg bg-purple-50 border border-purple-100 p-3 text-sm font-medium text-purple-700">
+                Online Examination
               </div>
 
-              {/* ONLINE SETTINGS */}
-
-              {examMode === "Online" && (
-                <>
-                  <div>
+              <div>
                     <label className="block text-sm font-medium mb-2">
                       Duration (Minutes)
                     </label>
@@ -2123,7 +1980,7 @@ const fetchAssignmentMarks = async (batchId?: number) => {
                     />
                   </div>
 
-                  <div>
+              <div>
                     <label className="block text-sm font-medium mb-2">
                       Exam Start Time
                     </label>
@@ -2143,8 +2000,6 @@ const fetchAssignmentMarks = async (batchId?: number) => {
                       {formatExamDate(settingsExam.exam_date)}
                     </p>
                   </div>
-                </>
-              )}
 
               {/* ATTEMPT LIMIT */}
 

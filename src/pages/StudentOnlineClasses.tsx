@@ -11,6 +11,8 @@ import {
   User,
 } from "lucide-react";
 
+import { apiFetch as fetch } from "../services/api";
+
 type ClassSchedule = {
   id: number;
   course_id: number;

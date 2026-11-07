@@ -14,6 +14,7 @@ import {
 
 import { Link, useNavigate } from "react-router-dom";
 import { useState, useEffect } from "react";
+import { apiFetch as fetch } from "../services/api";
 
 type Assignment = {
   id: number;

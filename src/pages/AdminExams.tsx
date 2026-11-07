@@ -1,5 +1,10 @@
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
@@ -13,8 +18,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-
-const API_BASE = "http://localhost:5000";
+import { apiFetch } from "../services/api";
 
 type Exam = {
   id: number;
@@ -60,6 +64,7 @@ type OverviewResponse = {
 type DetailsResponse = {
   exam: Exam;
   students: StudentResult[];
+  message?: string;
 };
 
 const emptyOverview: OverviewResponse = {
@@ -69,10 +74,8 @@ const emptyOverview: OverviewResponse = {
   exams: [],
 };
 
-const dateLabel = (value: string | null | undefined) => {
-  if (!value) return "—";
-  return value.slice(0, 10);
-};
+const dateLabel = (value?: string | null) =>
+  value ? value.slice(0, 10) : "—";
 
 function AdminExams() {
   const navigate = useNavigate();
@@ -84,6 +87,7 @@ function AdminExams() {
   const [filter, setFilter] = useState("All");
 
   const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
 
   const [selectedExam, setSelectedExam] =
@@ -95,17 +99,15 @@ function AdminExams() {
   const [detailsLoading, setDetailsLoading] =
     useState(false);
 
-  const [detailsError, setDetailsError] =
-    useState("");
+  const [detailsError, setDetailsError] = useState("");
 
-  const fetchOverview = useCallback(async (
-    showLoading = false
-  ) => {
-    if (showLoading) setLoading(true);
+  const fetchOverview = useCallback(async () => {
+    setLoading(true);
+    setError("");
 
     try {
-      const response = await fetch(
-        `${API_BASE}/api/admin/exams-overview`
+      const response = await apiFetch(
+        "/api/admin/exams-overview"
       );
 
       const data = await response.json();
@@ -116,16 +118,18 @@ function AdminExams() {
         );
       }
 
+      if (!Array.isArray(data.exams)) {
+        throw new Error("Invalid exams response.");
+      }
+
       setOverview({
         totalExams: Number(data.totalExams || 0),
         publishedExams: Number(data.publishedExams || 0),
         publishedResults: Number(data.publishedResults || 0),
-        exams: Array.isArray(data.exams)
-          ? data.exams
-          : [],
+        exams: data.exams,
       });
 
-      setError("");
+      setLoaded(true);
     } catch (err) {
       setError(
         err instanceof Error
@@ -138,29 +142,35 @@ function AdminExams() {
   }, []);
 
   useEffect(() => {
-    let user: { role?: string } = {};
+    let validAdmin = false;
 
     try {
-      user = JSON.parse(
+      const user = JSON.parse(
         localStorage.getItem("user") || "{}"
       );
+
+      validAdmin =
+        user.role === "admin" &&
+        typeof user.token === "string" &&
+        user.token.length > 0;
     } catch {
-      navigate("/login");
+      validAdmin = false;
+    }
+
+    if (!validAdmin) {
+      navigate("/login", { replace: true });
       return;
     }
 
-    if (user.role !== "admin") {
-      navigate("/login");
-      return;
-    }
-
-    void fetchOverview(true);
+    void fetchOverview();
 
     const interval = window.setInterval(() => {
       void fetchOverview();
     }, 60000);
 
-    return () => window.clearInterval(interval);
+    return () => {
+      window.clearInterval(interval);
+    };
   }, [navigate, fetchOverview]);
 
   const openExamDetails = async (exam: Exam) => {
@@ -170,17 +180,21 @@ function AdminExams() {
     setDetailsError("");
 
     try {
-      const response = await fetch(
-        `${API_BASE}/api/admin/exams/${exam.id}/details`
+      const response = await apiFetch(
+        `/api/admin/exams/${exam.id}/details`
       );
 
-      const data: DetailsResponse = await response.json();
+      const data: DetailsResponse =
+        await response.json();
 
       if (!response.ok) {
         throw new Error(
-          (data as unknown as { message?: string }).message ||
-          "Failed to load exam details."
+          data.message || "Failed to load exam details."
         );
+      }
+
+      if (!data.exam || !Array.isArray(data.students)) {
+        throw new Error("Invalid exam details response.");
       }
 
       setSelectedExam({
@@ -188,9 +202,7 @@ function AdminExams() {
         ...data.exam,
       });
 
-      setStudents(
-        Array.isArray(data.students) ? data.students : []
-      );
+      setStudents(data.students);
     } catch (err) {
       setDetailsError(
         err instanceof Error
@@ -202,15 +214,24 @@ function AdminExams() {
     }
   };
 
+  const closeDetails = () => {
+    setSelectedExam(null);
+    setStudents([]);
+    setDetailsError("");
+  };
+
   const filteredExams = useMemo(() => {
     const term = search.trim().toLowerCase();
 
     return overview.exams.filter((exam) => {
-      const matchesSearch =
-        exam.title.toLowerCase().includes(term) ||
-        exam.course_title.toLowerCase().includes(term) ||
-        exam.teacher_name.toLowerCase().includes(term) ||
-        exam.exam_type.toLowerCase().includes(term);
+      const matchesSearch = [
+        exam.title,
+        exam.course_title,
+        exam.teacher_name,
+        exam.exam_type,
+      ].some((value) =>
+        String(value || "").toLowerCase().includes(term)
+      );
 
       const matchesFilter =
         filter === "All" ||
@@ -258,7 +279,6 @@ function AdminExams() {
             <Link
               to="/admin-dashboard"
               className="p-2 rounded-lg hover:bg-slate-100 text-slate-600"
-              title="Back to Admin Dashboard"
             >
               <ArrowLeft size={20} />
             </Link>
@@ -271,6 +291,7 @@ function AdminExams() {
               <h1 className="text-2xl font-bold text-slate-800">
                 Exams & Results
               </h1>
+
               <p className="text-sm text-slate-500">
                 Monitor instructor exams and student performance
               </p>
@@ -279,8 +300,9 @@ function AdminExams() {
 
           <button
             type="button"
-            onClick={() => void fetchOverview(true)}
-            className="flex items-center gap-2 rounded-lg border bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            onClick={() => void fetchOverview()}
+            disabled={loading}
+            className="flex items-center gap-2 rounded-lg border bg-white px-4 py-2.5 text-sm font-semibold hover:bg-slate-50 disabled:opacity-50"
           >
             <RefreshCw size={17} />
             Refresh
@@ -304,8 +326,9 @@ function AdminExams() {
                     <p className="text-sm text-slate-500">
                       {card.label}
                     </p>
+
                     <h2 className="text-3xl font-bold text-slate-800 mt-2">
-                      {loading ? "..." : card.value}
+                      {!loaded ? "—" : card.value}
                     </h2>
                   </div>
 
@@ -328,6 +351,7 @@ function AdminExams() {
                 <h2 className="text-lg font-bold text-slate-800">
                   All Instructor Exams
                 </h2>
+
                 <p className="text-sm text-slate-500 mt-1">
                   View exams, results and student attempts
                 </p>
@@ -339,10 +363,13 @@ function AdminExams() {
                     size={17}
                     className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
                   />
+
                   <input
                     type="text"
                     value={search}
-                    onChange={(e) => setSearch(e.target.value)}
+                    onChange={(event) =>
+                      setSearch(event.target.value)
+                    }
                     placeholder="Search exam, course, teacher..."
                     className="border rounded-lg pl-9 pr-3 py-2.5 text-sm w-full sm:w-64 outline-none focus:border-purple-500"
                   />
@@ -350,11 +377,15 @@ function AdminExams() {
 
                 <select
                   value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
+                  onChange={(event) =>
+                    setFilter(event.target.value)
+                  }
                   className="border rounded-lg px-3 py-2.5 text-sm bg-white"
                 >
                   <option value="All">All Exams</option>
-                  <option value="Published">Published Exams</option>
+                  <option value="Published">
+                    Published Exams
+                  </option>
                   <option value="Draft">Draft Exams</option>
                   <option value="Results Published">
                     Results Published
@@ -365,32 +396,45 @@ function AdminExams() {
           </div>
 
           {error && (
-            <p className="mx-6 mt-5 p-3 bg-red-50 rounded-lg text-sm text-red-700">
+            <div
+              role="alert"
+              className="mx-6 mt-5 p-4 bg-red-50 border border-red-200 rounded-lg text-sm text-red-700"
+            >
               {error}
-            </p>
+            </div>
           )}
 
-          {loading ? (
+          {loading && !loaded ? (
             <p className="p-8 text-center text-slate-500">
               Loading exams...
             </p>
+          ) : error && !loaded ? (
+            <p className="p-8 text-center text-red-600">
+              Exam data could not be loaded.
+            </p>
           ) : filteredExams.length === 0 ? (
             <p className="p-8 text-center text-slate-500">
-              No exams found.
+              No matching exams found.
             </p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
                 <thead className="bg-slate-50 text-slate-600 border-b">
                   <tr>
-                    <th className="p-4">Exam</th>
-                    <th className="p-4">Course</th>
-                    <th className="p-4">Instructor</th>
-                    <th className="p-4">Date</th>
-                    <th className="p-4">Students</th>
-                    <th className="p-4">Status</th>
-                    <th className="p-4">Results</th>
-                    <th className="p-4">Details</th>
+                    {[
+                      "Exam",
+                      "Course",
+                      "Instructor",
+                      "Date",
+                      "Students",
+                      "Status",
+                      "Results",
+                      "Details",
+                    ].map((heading) => (
+                      <th key={heading} className="p-4">
+                        {heading}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
 
@@ -404,6 +448,7 @@ function AdminExams() {
                         <p className="font-semibold text-slate-800">
                           {exam.title}
                         </p>
+
                         <p className="text-xs text-slate-500 mt-1">
                           {exam.exam_type} · {exam.exam_mode}
                         </p>
@@ -481,6 +526,7 @@ function AdminExams() {
                 <h2 className="text-xl font-bold text-slate-800">
                   {selectedExam.title}
                 </h2>
+
                 <p className="text-sm text-slate-500 mt-1">
                   {selectedExam.course_title} · Instructor:{" "}
                   {selectedExam.teacher_name}
@@ -489,82 +535,82 @@ function AdminExams() {
 
               <button
                 type="button"
-                onClick={() => setSelectedExam(null)}
+                onClick={closeDetails}
+                className="p-2 rounded-lg hover:bg-slate-100"
                 aria-label="Close details"
-                className="text-slate-500 hover:text-slate-900 p-1"
               >
                 <X size={22} />
               </button>
             </div>
 
             <div className="p-6 space-y-6">
-              {/* EXAM DETAILS */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div className="bg-slate-50 rounded-lg p-4">
-                  <p className="text-xs text-slate-500 flex items-center gap-2">
-                    <Calendar size={14} />
-                    Exam Date
-                  </p>
-                  <p className="font-bold mt-2">
-                    {dateLabel(selectedExam.exam_date)}
-                  </p>
-                </div>
-
-                <div className="bg-slate-50 rounded-lg p-4">
-                  <p className="text-xs text-slate-500">
-                    Exam Type
-                  </p>
-                  <p className="font-bold mt-2">
-                    {selectedExam.exam_type}
-                  </p>
-                </div>
-
-                <div className="bg-slate-50 rounded-lg p-4">
-                  <p className="text-xs text-slate-500">
-                    Total Marks
-                  </p>
-                  <p className="font-bold mt-2">
-                    {selectedExam.total_marks}
-                  </p>
-                </div>
-
-                <div className="bg-slate-50 rounded-lg p-4">
-                  <p className="text-xs text-slate-500">
-                    Results Status
-                  </p>
-                  <p
-                    className={`font-bold mt-2 ${
+                {[
+                  {
+                    label: "Exam Date",
+                    value: dateLabel(selectedExam.exam_date),
+                  },
+                  {
+                    label: "Exam Type",
+                    value: selectedExam.exam_type,
+                  },
+                  {
+                    label: "Total Marks",
+                    value: String(selectedExam.total_marks),
+                  },
+                  {
+                    label: "Results Status",
+                    value:
                       Number(selectedExam.result_published) === 1
-                        ? "text-green-600"
-                        : "text-orange-600"
-                    }`}
+                        ? "Published"
+                        : "Not Published",
+                  },
+                ].map((item) => (
+                  <div
+                    key={item.label}
+                    className="bg-slate-50 rounded-lg p-4"
                   >
-                    {Number(selectedExam.result_published) === 1
-                      ? "Published"
-                      : "Not Published"}
-                  </p>
-                </div>
+                    <p className="text-xs text-slate-500 flex items-center gap-2">
+                      {item.label === "Exam Date" && (
+                        <Calendar size={14} />
+                      )}
+                      {item.label}
+                    </p>
+
+                    <p className="font-bold mt-2">
+                      {item.value}
+                    </p>
+                  </div>
+                ))}
               </div>
 
               <div className="flex flex-wrap gap-3 text-sm text-slate-600">
                 <span className="bg-slate-100 px-3 py-2 rounded-lg">
                   Mode: {selectedExam.exam_mode}
                 </span>
+
                 <span className="bg-slate-100 px-3 py-2 rounded-lg">
-                  Start: {selectedExam.start_time?.slice(0, 5) || "—"}
+                  Start:{" "}
+                  {selectedExam.start_time?.slice(0, 5) || "—"}
                 </span>
+
                 <span className="bg-slate-100 px-3 py-2 rounded-lg">
-                  Duration: {selectedExam.duration_minutes ?? "—"} min
+                  Duration:{" "}
+                  {selectedExam.duration_minutes ?? "—"} min
                 </span>
+
                 <span className="bg-slate-100 px-3 py-2 rounded-lg">
                   Attempt Limit: {selectedExam.attempt_limit}
                 </span>
               </div>
 
-              {/* STUDENTS */}
-              <div>
+              <section>
                 <div className="flex items-center gap-2 mb-4">
-                  <Users size={20} className="text-purple-600" />
+                  <Users
+                    size={20}
+                    className="text-purple-600"
+                  />
+
                   <h3 className="text-lg font-bold text-slate-800">
                     Student Results & Attempts
                   </h3>
@@ -575,7 +621,10 @@ function AdminExams() {
                     Loading student results...
                   </p>
                 ) : detailsError ? (
-                  <p className="text-red-600 py-4">
+                  <p
+                    role="alert"
+                    className="text-red-600 py-4"
+                  >
                     {detailsError}
                   </p>
                 ) : students.length === 0 ? (
@@ -587,13 +636,22 @@ function AdminExams() {
                     <table className="w-full text-left text-sm">
                       <thead className="bg-slate-50 border-b text-slate-600">
                         <tr>
-                          <th className="p-3">Student</th>
-                          <th className="p-3">Marks</th>
-                          <th className="p-3">Grade</th>
-                          <th className="p-3">Result Status</th>
-                          <th className="p-3">Attempts</th>
-                          <th className="p-3">Latest Attempt</th>
-                          <th className="p-3">Feedback</th>
+                          {[
+                            "Student",
+                            "Marks",
+                            "Grade",
+                            "Result Status",
+                            "Attempts",
+                            "Latest Attempt",
+                            "Feedback",
+                          ].map((heading) => (
+                            <th
+                              key={heading}
+                              className="p-3"
+                            >
+                              {heading}
+                            </th>
+                          ))}
                         </tr>
                       </thead>
 
@@ -620,15 +678,7 @@ function AdminExams() {
                             </td>
 
                             <td className="p-3">
-                              <span
-                                className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
-                                  student.result_status === "Graded"
-                                    ? "bg-green-100 text-green-700"
-                                    : "bg-amber-100 text-amber-700"
-                                }`}
-                              >
-                                {student.result_status}
-                              </span>
+                              {student.result_status}
                             </td>
 
                             <td className="p-3">
@@ -636,10 +686,10 @@ function AdminExams() {
                             </td>
 
                             <td className="p-3">
-                              {student.latest_attempt_status || "Not Started"}
+                              {student.latest_attempt_status || "—"}
                             </td>
 
-                            <td className="p-3 text-slate-600 max-w-xs">
+                            <td className="p-3">
                               {student.feedback || "—"}
                             </td>
                           </tr>
@@ -648,13 +698,7 @@ function AdminExams() {
                     </table>
                   </div>
                 )}
-              </div>
-
-              <div className="border-t pt-4 text-xs text-slate-500">
-                Admin monitoring only. Exam creation,
-                marks editing and result publication
-                remain under the instructor module.
-              </div>
+              </section>
             </div>
           </div>
         </div>

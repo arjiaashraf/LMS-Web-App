@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { Users, Upload, Plus } from "lucide-react";
+import { apiFetch as fetch } from "../services/api";
 
 interface InstructorCoursesProps {
   teacherId: number | null;

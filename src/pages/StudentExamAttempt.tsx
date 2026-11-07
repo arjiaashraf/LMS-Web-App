@@ -13,6 +13,7 @@ import {
   RefreshCw,
   Save,
 } from "lucide-react";
+import { apiFetch as fetch } from "../services/api";
 
 const API_BASE = "http://localhost:5000";
 

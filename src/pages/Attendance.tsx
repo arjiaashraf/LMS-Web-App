@@ -1,4 +1,4 @@
-
+import { apiFetch } from "../services/api";
 import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import {
@@ -56,20 +56,19 @@ function Attendance() {
       setLoading(true);
       setError("");
 
-      const response = await fetch(
-        "http://localhost:5000/api/admin/attendance"
+      const response = await apiFetch(
+        "/api/admin/attendance"
       );
 
-      if (!response.ok) {
-        throw new Error("Failed to fetch attendance");
-      }
-
       const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || `Attendance API error (${response.status})`);
+      }
 
       setRecords(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Attendance fetch error:", err);
-      setError("Unable to load attendance records.");
+      setError(err instanceof Error ? err.message : "Unable to load attendance records.");
     } finally {
       setLoading(false);
     }

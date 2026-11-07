@@ -1,3 +1,4 @@
+import { apiFetch } from "../services/api";
 import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import {
@@ -44,6 +45,8 @@ function OnlineClasses() {
   const [enrolledStudents, setEnrolledStudents] = useState<EnrolledStudent[]>([]);
   const [loadingStudents, setLoadingStudents] = useState(false);
   const [showModal, setShowModal] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [studentsError, setStudentsError] = useState("");
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -65,14 +68,16 @@ function OnlineClasses() {
   }, [navigate]);
 
   const fetchAllClasses = async () => {
+    setLoadError("");
     try {
-      const res = await fetch("http://localhost:5000/api/admin/class-schedules");
+      const res = await apiFetch("/api/admin/class-schedules");
       const data = await res.json();
-      if (res.ok) {
-        setClasses(data);
-      }
+      if (!res.ok) throw new Error(data.message || `Classes API error (${res.status})`);
+      if (!Array.isArray(data)) throw new Error("Invalid class schedules response.");
+      setClasses(data);
     } catch (err) {
       console.error("Error fetching classes for admin:", err);
+      setLoadError(err instanceof Error ? err.message : "Unable to load classes.");
     }
   };
 
@@ -81,15 +86,17 @@ function OnlineClasses() {
     setShowModal(true);
     setLoadingStudents(true);
     setEnrolledStudents([]);
+    setStudentsError("");
 
     try {
-      const res = await fetch( `http://localhost:5000/api/admin/class-batch-students/${cls.course_batch_id}`);
+      const res = await apiFetch( `/api/admin/class-batch-students/${cls.course_batch_id}`);
       const data = await res.json();
-      if (res.ok) {
-        setEnrolledStudents(data);
-      }
+      if (!res.ok) throw new Error(data.message || `Students API error (${res.status})`);
+      if (!Array.isArray(data)) throw new Error("Invalid class students response.");
+      setEnrolledStudents(data);
     } catch (err) {
       console.error("Error fetching enrolled students:", err);
+      setStudentsError(err instanceof Error ? err.message : "Unable to load enrolled students.");
     } finally {
       setLoadingStudents(false);
     }
@@ -155,6 +162,7 @@ function OnlineClasses() {
           </div>
         </div>
 
+        {loadError && <p role="alert" className="bg-red-50 text-red-700 rounded-lg p-4">{loadError}</p>}
         {/* TABLE SECTION */}
         <div className="bg-white rounded-xl shadow-sm overflow-hidden">
           <div className="p-5 border-b flex items-center justify-between">
@@ -284,6 +292,8 @@ function OnlineClasses() {
                 </p>
                 {loadingStudents ? (
                   <p className="text-xs text-slate-400 italic py-2">Loading students list...</p>
+                ) : studentsError ? (
+                  <p role="alert" className="text-xs text-red-600 py-2">{studentsError}</p>
                 ) : enrolledStudents.length === 0 ? (
                   <p className="text-xs text-slate-400 italic py-2">No students enrolled in this course yet.</p>
                 ) : (

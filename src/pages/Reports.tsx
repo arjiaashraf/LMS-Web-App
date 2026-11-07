@@ -1,6 +1,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { apiFetch } from "../services/api";
 import {
   ArrowLeft,
   CalendarDays,
@@ -13,8 +14,6 @@ import {
   Users,
   X,
 } from "lucide-react";
-
-const API_BASE = "http://localhost:5000";
 
 type ExamReport = {
   id: number;
@@ -100,6 +99,7 @@ function Reports() {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("Published");
@@ -117,9 +117,11 @@ function Reports() {
     useState(false);
 
   const loadOverview = useCallback(async () => {
+    setLoading(true);
+    setError("");
     try {
-      const response = await fetch(
-        `${API_BASE}/api/admin/exam-reports`
+      const response = await apiFetch(
+        "/api/admin/exam-reports"
       );
 
       const data = await response.json();
@@ -139,7 +141,7 @@ function Reports() {
           : [],
       });
 
-      setError("");
+      setHasLoaded(true);
     } catch (err) {
       setError(
         err instanceof Error
@@ -158,11 +160,11 @@ function Reports() {
       );
 
       if (user.role !== "admin") {
-        navigate("/login");
+        navigate("/login", { replace: true });
         return;
       }
     } catch {
-      navigate("/login");
+      navigate("/login", { replace: true });
       return;
     }
 
@@ -208,8 +210,8 @@ function Reports() {
     setDetailsError("");
 
     try {
-      const response = await fetch(
-        `${API_BASE}/api/admin/exam-reports/${examId}`
+      const response = await apiFetch(
+        `/api/admin/exam-reports/${examId}`
       );
 
       const data = await response.json();
@@ -218,6 +220,10 @@ function Reports() {
         throw new Error(
           data.message || "Failed to load exam details."
         );
+      }
+
+      if (!data.exam || !Array.isArray(data.students)) {
+        throw new Error("Invalid exam report response.");
       }
 
       setSelected({
@@ -321,7 +327,7 @@ function Reports() {
                       {card.title}
                     </p>
                     <h2 className="text-3xl font-bold mt-2 text-slate-800">
-                      {loading ? "..." : card.value}
+                      {loading || (error && !hasLoaded) ? "—" : card.value}
                     </h2>
                   </div>
 
@@ -376,7 +382,7 @@ function Reports() {
           </div>
 
           {error && (
-            <p className="m-5 p-3 bg-red-50 text-red-700 rounded-lg">
+            <p role="alert" className="m-5 p-3 bg-red-50 text-red-700 rounded-lg">
               {error}
             </p>
           )}
@@ -385,7 +391,7 @@ function Reports() {
             <p className="text-center p-10 text-slate-500">
               Loading exam reports...
             </p>
-          ) : filteredExams.length === 0 ? (
+          ) : error ? null : filteredExams.length === 0 ? (
             <p className="text-center p-10 text-slate-500">
               No matching exams found.
             </p>

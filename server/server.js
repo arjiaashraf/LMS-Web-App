@@ -10,10 +10,68 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const jwt = require('jsonwebtoken');
 
+const helmet = require("helmet");
+const { rateLimit } = require("express-rate-limit");
+
+
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(cors());
+
+app.disable("x-powered-by");
+
+app.use(helmet());
+
+const allowedOrigins = (
+  process.env.FRONTEND_URL ||
+  "http://localhost:5173,http://localhost:5174"
+)
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      // Allow non-browser clients without an Origin header.
+      if (!origin || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("CORS origin not allowed."));
+    },
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: false,
+  })
+);
+
+// Limit repeated authentication requests.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: {
+    message: "Too many login attempts. Try again later.",
+  },
+});
+
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: {
+    message: "Too many verification requests. Try again later.",
+  },
+});
+
+app.use("/api/login", loginLimiter);
+app.use("/api/register", otpLimiter);
+app.use("/api/auth/resend-otp", otpLimiter);
+app.use("/api/auth/verify-email", otpLimiter);
+
 
 // PAYMENT RECEIPT UPLOAD CONFIGURATION
 const receiptDirectory = path.join(__dirname, 'uploads', 'receipts');
@@ -49,37 +107,6 @@ const receiptUpload = multer({
   }
 });
 
-// 👇 YAHAN RECEIPT VIEW API ADD KARO
-
-app.get('/api/admin/payment-receipt/:enrollmentId', (req, res) => {
-  const enrollmentId = Number(req.params.enrollmentId);
-
-  if (!Number.isInteger(enrollmentId) || enrollmentId <= 0) {
-    return res.status(400).json({ message: 'Invalid enrollment ID.' });
-  }
-
-  db.query(
-    'SELECT payment_proof FROM course_enrollments WHERE id = ?',
-    [enrollmentId],
-    (err, results) => {
-      if (err) return res.status(500).json({ message: 'Database error' });
-
-      if (!results.length) {
-        return res.status(404).json({ message: 'Receipt not found.' });
-      }
-
-      const filename = results[0].payment_proof;
-
-      if (!/^[a-f0-9-]{36}\.(jpg|png|pdf)$/.test(filename || ''))  {
-        return res.status(404).json({
-          message: 'Valid uploaded receipt not found.'
-        });
-      }
-
-      res.sendFile(filename, { root: receiptDirectory });
-    }
-  );
-});
 
 // MySQL Database Connection
 // MySQL Database Connection
@@ -145,6 +172,1430 @@ const createLoginToken = (user) => {
     { expiresIn: '2h', algorithm: 'HS256' }
   );
 };
+
+
+/* =================================================
+   CAMPUS 95 — JWT AUTHENTICATION MIDDLEWARE
+   ================================================= */
+
+const authenticateToken = async (req, res, next) => {
+  const authorization = req.headers.authorization || "";
+
+  const match = /^Bearer\s+(.+)$/i.exec(authorization);
+
+  if (!match) {
+    return res.status(401).json({
+      message: "Authentication required. Please login."
+    });
+  }
+
+  const token = match[1];
+
+  try {
+    if (!process.env.JWT_SECRET) {
+      console.error("JWT_SECRET is missing.");
+
+      return res.status(500).json({
+        message: "Authentication configuration error."
+      });
+    }
+
+    const decoded = jwt.verify(
+      token,
+      process.env.JWT_SECRET,
+      { algorithms: ["HS256"] }
+    );
+
+    const userId = Number(decoded.sub);
+
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+      return res.status(401).json({
+        message: "Invalid authentication token."
+      });
+    }
+
+    
+const users = await authQuery(
+  `SELECT id, name, email, role, status, email_verified
+   FROM users
+   WHERE id = ?
+     AND is_deleted = 0
+   LIMIT 1`,
+  [userId]
+);
+
+
+    if (!users.length) {
+      return res.status(401).json({
+        message: "User account no longer exists."
+      });
+    }
+
+    const user = users[0];
+
+    if (Number(user.email_verified) !== 1) {
+      return res.status(403).json({
+        message: "Email verification required."
+      });
+    }
+
+    if (
+      user.role !== "admin" &&
+      user.status !== "approved"
+    ) {
+      return res.status(403).json({
+        message: "Your account is not approved."
+      });
+    }
+
+    req.user = {
+      id: Number(user.id),
+      name: user.name,
+      email: user.email,
+      role: user.role
+    };
+
+    next();
+
+  } catch (error) {
+    if (
+      error.name === "TokenExpiredError" ||
+      error.name === "JsonWebTokenError" ||
+      error.name === "NotBeforeError"
+    ) {
+      return res.status(401).json({
+        message: "Session expired or invalid. Please login again."
+      });
+    }
+
+    console.error("Authentication error:", error);
+
+    return res.status(500).json({
+      message: "Failed to verify authentication."
+    });
+  }
+};
+
+
+/* =================================================
+   ROLE-BASED AUTHORIZATION MIDDLEWARE
+   ================================================= */
+
+
+
+const authorizeRoles = (...allowedRoles) => {
+  return (req, res, next) => {
+
+    if (!req.user) {
+      return res.status(401).json({
+        message: "Authentication required."
+      });
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        message: "Access denied. Insufficient permissions."
+      });
+    }
+
+    next();
+  };
+};
+
+
+/* =====================================================
+   CAMPUS 95 — ADMIN & STUDENT SECURITY
+   Protected independently of LMS_ENFORCE_AUTH flag.
+   ===================================================== */
+
+const securePositiveId = (value) => {
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0;
+};
+
+const secureSameUser = (value, userId) =>
+  securePositiveId(value) &&
+  Number(value) === Number(userId);
+
+const securityDenied = (res) =>
+  res.status(403).json({
+    message: "Access denied. Insufficient permissions."
+  });
+
+// =============== ADMIN SECURITY ===============
+
+// Protect all /api/admin/* routes.
+// Exception: instructors viewing their assigned batch roster.
+app.use("/api/admin", authenticateToken, async (req, res, next) => {
+  if (req.user.role === "admin") {
+    return next();
+  }
+
+  const rosterMatch =
+    req.method === "GET"
+      ? req.path.match(/^\/class-batch-students\/(\d+)$/)
+      : null;
+
+  if (req.user.role === "instructor" && rosterMatch) {
+    try {
+      const batchId = Number(rosterMatch[1]);
+
+      const rows = await authQuery(
+        `SELECT cb.id
+         FROM course_batches cb
+         WHERE cb.id = ?
+           AND (
+             cb.instructor_id = ?
+             OR EXISTS (
+               SELECT 1
+               FROM batch_instructors bi
+               WHERE bi.batch_id = cb.id
+                 AND bi.instructor_id = ?
+             )
+           )
+         LIMIT 1`,
+        [batchId, req.user.id, req.user.id]
+      );
+
+      if (!rows.length) {
+        return securityDenied(res);
+      }
+
+      return next();
+    } catch (error) {
+      console.error("Roster authorization error:", error);
+      return res.status(500).json({
+        message: "Authorization check failed."
+      });
+    }
+  }
+
+  return securityDenied(res);
+});
+
+// Admin-managed user listings.
+app.use(
+  ["/api/students", "/api/teachers"],
+  authenticateToken,
+  authorizeRoles("admin")
+);
+
+// =============== STUDENT SECURITY ===============
+
+app.use("/api/student", (req, res, next) => {
+  // Published course catalog is public.
+  if (req.method === "GET" && req.path === "/courses") {
+    return next();
+  }
+
+  return authenticateToken(req, res, () => {
+    authorizeRoles("student")(req, res, next);
+  });
+});
+
+// Verify student identity and ownership.
+app.use("/api/student", async (req, res, next) => {
+  if (req.method === "GET" && req.path === "/courses") {
+    return next();
+  }
+
+  const userId = req.user.id;
+
+  // These paths contain student IDs, not resource IDs.
+  const studentIdPatterns = [
+    /^\/(\d+)$/,
+    /^\/dashboard\/(\d+)$/,
+    /^\/update-profile\/(\d+)$/,
+    /^\/enrolled-batches\/(\d+)$/,
+    /^\/assignments\/(\d+)$/,
+    /^\/attendance\/(\d+)$/,
+    /^\/class-schedules\/(\d+)$/,
+    /^\/exams\/(\d+)$/,
+    /^\/exam-attempt-statuses\/(\d+)$/
+  ];
+
+  for (const pattern of studentIdPatterns) {
+    const match = req.path.match(pattern);
+
+    if (match && !secureSameUser(match[1], userId)) {
+      return securityDenied(res);
+    }
+  }
+
+  // Check student IDs supplied inside JSON.
+  // Multipart data is parsed later by Multer.
+  for (const field of ["student_id", "studentId"]) {
+    if (
+      req.body?.[field] !== undefined &&
+      !secureSameUser(req.body[field], userId)
+    ) {
+      return securityDenied(res);
+    }
+
+    if (
+      req.query?.[field] !== undefined &&
+      !secureSameUser(req.query[field], userId)
+    ) {
+      return securityDenied(res);
+    }
+  }
+
+  try {
+    // A student may access only their own exam attempts.
+    const attemptMatch = req.path.match(
+      /^\/exam-attempts\/(\d+)(?:\/.*)?$/
+    );
+
+    if (attemptMatch) {
+      const attemptId = Number(attemptMatch[1]);
+
+      const attempts = await authQuery(
+        `SELECT id
+         FROM exam_attempts
+         WHERE id = ?
+           AND student_id = ?
+         LIMIT 1`,
+        [attemptId, userId]
+      );
+
+      if (!attempts.length) {
+        return securityDenied(res);
+      }
+    }
+
+    // A student may start only an enrolled exam.
+    const examStartMatch = req.path.match(
+      /^\/exams\/(\d+)\/start$/
+    );
+
+    if (examStartMatch) {
+      const examId = Number(examStartMatch[1]);
+
+      const exams = await authQuery(
+        `SELECT e.id
+         FROM exams e
+         JOIN course_enrollments ce
+           ON ce.course_batch_id = e.course_batch_id
+         WHERE e.id = ?
+           AND ce.student_id = ?
+           AND ce.status = 'Active'
+         LIMIT 1`,
+        [examId, userId]
+      );
+
+      if (!exams.length) {
+        return securityDenied(res);
+      }
+    }
+
+    return next();
+  } catch (error) {
+    console.error("Student authorization error:", error);
+
+    return res.status(500).json({
+      message: "Authorization check failed."
+    });
+  }
+});
+
+
+
+/* ==========================================================
+   CAMPUS 95 — CENTRAL API SECURITY GATE
+   ==========================================================
+   This middleware:
+   1. Protects private API routes with JWT.
+   2. Checks Admin, Instructor, and Student roles.
+   3. Verifies selected user and exam ownership.
+   4. Blocks the database debug endpoint.
+   5. Supports staged rollout to avoid breaking the LMS.
+   ========================================================== */
+
+// Keep false until all frontend requests send JWT.
+// Set LMS_ENFORCE_AUTH=true in .env after integration/testing.
+const ENFORCE_LMS_AUTH =
+  process.env.LMS_ENFORCE_AUTH === "true";
+
+
+if (
+  process.env.NODE_ENV === "production" &&
+  !ENFORCE_LMS_AUTH
+) {
+  throw new Error(
+    "SECURITY ERROR: Production requires LMS_ENFORCE_AUTH=true."
+  );
+}
+
+
+const validSecurityId = (value) => {
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0;
+};
+
+const sameSecurityId = (a, b) =>
+  validSecurityId(a) &&
+  validSecurityId(b) &&
+  Number(a) === Number(b);
+
+const checkStudentAttemptOwnership = async (
+  attemptId,
+  studentId
+) => {
+  const rows = await authQuery(
+    `SELECT id
+     FROM exam_attempts
+     WHERE id = ?
+       AND student_id = ?
+     LIMIT 1`,
+    [attemptId, studentId]
+  );
+
+  return rows.length > 0;
+};
+
+const checkStudentExamEnrollment = async (
+  examId,
+  studentId
+) => {
+  const rows = await authQuery(
+    `SELECT e.id
+     FROM exams e
+     JOIN course_enrollments ce
+       ON ce.course_batch_id = e.course_batch_id
+     WHERE e.id = ?
+       AND ce.student_id = ?
+       AND ce.status = 'Active'
+     LIMIT 1`,
+    [examId, studentId]
+  );
+
+  return rows.length > 0;
+};
+
+const checkTeacherExamOwnership = async (
+  examId,
+  teacherId
+) => {
+  const rows = await authQuery(
+    `SELECT id
+     FROM exams
+     WHERE id = ?
+       AND teacher_id = ?
+     LIMIT 1`,
+    [examId, teacherId]
+  );
+
+  return rows.length > 0;
+};
+
+const checkTeacherAttemptOwnership = async (
+  attemptId,
+  teacherId
+) => {
+  const rows = await authQuery(
+    `SELECT a.id
+     FROM exam_attempts a
+     JOIN exams e ON e.id = a.exam_id
+     WHERE a.id = ?
+       AND e.teacher_id = ?
+     LIMIT 1`,
+    [attemptId, teacherId]
+  );
+
+  return rows.length > 0;
+};
+
+const checkTeacherBatchAccess = async (
+  batchId,
+  teacherId
+) => {
+  const rows = await authQuery(
+    `SELECT cb.id
+     FROM course_batches cb
+     WHERE cb.id = ?
+       AND (
+         cb.instructor_id = ?
+         OR EXISTS (
+           SELECT 1
+           FROM batch_instructors bi
+           WHERE bi.batch_id = cb.id
+             AND bi.instructor_id = ?
+         )
+       )
+     LIMIT 1`,
+    [batchId, teacherId, teacherId]
+  );
+
+  return rows.length > 0;
+};
+
+const checkTeacherAssignmentAccess = async (
+  assignmentId,
+  teacherId
+) => {
+  const rows = await authQuery(
+    `SELECT a.id
+     FROM assignments a
+     JOIN course_batches cb
+       ON cb.id = a.course_batch_id
+     WHERE a.id = ?
+       AND (
+         cb.instructor_id = ?
+         OR EXISTS (
+           SELECT 1
+           FROM batch_instructors bi
+           WHERE bi.batch_id = cb.id
+             AND bi.instructor_id = ?
+         )
+       )
+     LIMIT 1`,
+    [assignmentId, teacherId, teacherId]
+  );
+
+  return rows.length > 0;
+};
+
+
+
+/* =====================================================
+   CAMPUS 95 — INSTRUCTOR BACKEND SECURITY
+   JWT + ROLE + OWNERSHIP
+   Works independently of LMS_ENFORCE_AUTH.
+   ===================================================== */
+
+const instructorSecurity = async (req, res, next) => {
+  try {
+    if (!req.user || req.user.role !== "instructor") {
+      return res.status(403).json({
+        message: "Instructor access required."
+      });
+    }
+
+    const teacherId = req.user.id;
+    const method = req.method;
+    
+const route = `${req.baseUrl}${req.path}`.replace(/^\/api(?=\/)/, "");
+
+    const deny = () =>
+      res.status(403).json({
+        message: "Access denied to this instructor resource."
+      });
+
+    const validId = (value) => {
+      const id = Number(value);
+      return Number.isSafeInteger(id) && id > 0;
+    };
+
+    const ownId = (value) =>
+      validId(value) && Number(value) === teacherId;
+
+    const body = req.body || {};
+
+    // Never trust instructor IDs supplied by the frontend.
+    for (const field of ["teacher_id", "instructor_id"]) {
+      if (
+        body[field] !== undefined &&
+        !ownId(body[field])
+      ) {
+        return deny();
+      }
+
+      if (
+        req.query[field] !== undefined &&
+        !ownId(req.query[field])
+      ) {
+        return deny();
+      }
+    }
+
+    const batchAccess = async (batchId) => {
+      if (!validId(batchId)) return false;
+
+      const rows = await authQuery(
+        `SELECT cb.id
+         FROM course_batches cb
+         WHERE cb.id = ?
+           AND (
+             cb.instructor_id = ?
+             OR EXISTS (
+               SELECT 1
+               FROM batch_instructors bi
+               WHERE bi.batch_id = cb.id
+                 AND bi.instructor_id = ?
+             )
+           )
+         LIMIT 1`,
+        [batchId, teacherId, teacherId]
+      );
+
+      return rows.length > 0;
+    };
+
+    const courseAccess = async (courseId) => {
+      if (!validId(courseId)) return false;
+
+      const rows = await authQuery(
+        `SELECT cb.id
+         FROM course_batches cb
+         WHERE cb.course_id = ?
+           AND (
+             cb.instructor_id = ?
+             OR EXISTS (
+               SELECT 1
+               FROM batch_instructors bi
+               WHERE bi.batch_id = cb.id
+                 AND bi.instructor_id = ?
+             )
+           )
+         LIMIT 1`,
+        [courseId, teacherId, teacherId]
+      );
+
+      return rows.length > 0;
+    };
+
+    const examAccess = async (examId) => {
+      if (!validId(examId)) return false;
+
+      const rows = await authQuery(
+        `SELECT e.id
+         FROM exams e
+         WHERE e.id = ?
+           AND e.teacher_id = ?
+         LIMIT 1`,
+        [examId, teacherId]
+      );
+
+      return rows.length > 0;
+    };
+
+    const attemptAccess = async (attemptId) => {
+      if (!validId(attemptId)) return false;
+
+      const rows = await authQuery(
+        `SELECT a.id
+         FROM exam_attempts a
+         JOIN exams e ON e.id = a.exam_id
+         WHERE a.id = ?
+           AND e.teacher_id = ?
+         LIMIT 1`,
+        [attemptId, teacherId]
+      );
+
+      return rows.length > 0;
+    };
+
+    const assignmentAccess = async (assignmentId) => {
+      if (!validId(assignmentId)) return false;
+
+      const rows = await authQuery(
+        `SELECT a.id
+         FROM assignments a
+         JOIN course_batches cb
+           ON cb.id = a.course_batch_id
+         WHERE a.id = ?
+           AND (
+             cb.instructor_id = ?
+             OR EXISTS (
+               SELECT 1
+               FROM batch_instructors bi
+               WHERE bi.batch_id = cb.id
+                 AND bi.instructor_id = ?
+             )
+           )
+         LIMIT 1`,
+        [assignmentId, teacherId, teacherId]
+      );
+
+      return rows.length > 0;
+    };
+
+    const sessionAccess = async (sessionId) => {
+      if (!validId(sessionId)) return false;
+
+      const rows = await authQuery(
+        `SELECT cs.id
+         FROM class_schedules cs
+         WHERE cs.id = ?
+           AND cs.instructor_id = ?
+         LIMIT 1`,
+        [sessionId, teacherId]
+      );
+
+      return rows.length > 0;
+    };
+
+    // =============================================
+    // INSTRUCTOR COURSES
+    // =============================================
+
+    if (
+      method === "POST" &&
+      route === "/instructor/propose-course"
+    ) {
+      return next();
+    }
+    
+    // Instructor can update only their own class.
+    const classStatusMatch = route.match(
+      /^\/teacher\/class-schedule\/status\/(\d+)$/
+    );
+
+    if (method === "PUT" && classStatusMatch) {
+      return (await sessionAccess(classStatusMatch[1]))
+        ? next()
+        : deny();
+    }
+
+
+    const instructorBatches = route.match(
+      /^\/instructor\/batches\/(\d+)$/
+    );
+
+    if (method === "GET" && instructorBatches) {
+      return ownId(instructorBatches[1])
+        ? next()
+        : deny();
+    }
+
+    const batchStudents = route.match(
+      /^\/instructor\/batch-students\/(\d+)$/
+    );
+
+    if (method === "GET" && batchStudents) {
+      return (await batchAccess(batchStudents[1]))
+        ? next()
+        : deny();
+    }
+
+    // =============================================
+    // ROUTES WITH INSTRUCTOR ID IN URL
+    // =============================================
+
+    const personalRoutes = [
+      /^\/teacher\/dashboard\/(\d+)$/,
+      /^\/teacher\/(\d+)$/,
+      /^\/teacher\/update-profile\/(\d+)$/,
+      /^\/teacher\/assignment-batches\/(\d+)$/,
+      /^\/teacher\/assignments\/(\d+)$/,
+      /^\/teacher\/class-schedules\/(\d+)$/,
+      /^\/teacher\/courses\/(\d+)$/,
+      /^\/teacher\/exams\/(\d+)$/
+    ];
+
+    for (const pattern of personalRoutes) {
+      const match = route.match(pattern);
+
+      if (match) {
+        return ownId(match[1]) ? next() : deny();
+      }
+    }
+
+    // =============================================
+    // ASSIGNMENT SECURITY
+    // =============================================
+
+    
+    // Instructor may grade only assignments
+    // belonging to their assigned batches.
+    if (
+      method === "POST" &&
+      route === "/teacher/grade-submission"
+    ) {
+      const assignmentId = Number(body.assignment_id);
+
+      if (
+        !Number.isSafeInteger(assignmentId) ||
+        assignmentId <= 0
+      ) {
+        return res.status(400).json({
+          message: "Invalid assignment ID."
+        });
+      }
+
+      return (await assignmentAccess(assignmentId))
+        ? next()
+        : deny();
+    }
+
+
+    if (
+      method === "POST" &&
+      route === "/teacher/assignments"
+    ) {
+      return (await batchAccess(body.course_batch_id))
+        ? next()
+        : deny();
+    }
+
+    const submissions = route.match(
+      /^\/teacher\/assignment-submissions\/(\d+)\/(\d+)$/
+    );
+
+    if (method === "GET" && submissions) {
+      if (!ownId(submissions[2])) return deny();
+
+      return (await assignmentAccess(submissions[1]))
+        ? next()
+        : deny();
+    }
+
+    // =============================================
+    // ONLINE CLASSES & ATTENDANCE
+    // =============================================
+
+    if (
+      method === "POST" &&
+      route === "/teacher/class-schedule"
+    ) {
+      return (await batchAccess(body.course_batch_id))
+        ? next()
+        : deny();
+    }
+
+    const updateClass = route.match(
+      /^\/teacher\/class-schedule\/status\/(\d+)$/
+    );
+
+    if (method === "PUT" && updateClass) {
+      return (await sessionAccess(updateClass[1]))
+        ? next()
+        : deny();
+    }
+
+    const attendanceSession = route.match(
+      /^\/teacher\/attendance\/(\d+)$/
+    );
+
+    if (method === "GET" && attendanceSession) {
+      return (await sessionAccess(attendanceSession[1]))
+        ? next()
+        : deny();
+    }
+
+    if (
+      method === "POST" &&
+      route === "/teacher/attendance"
+    ) {
+      return (await sessionAccess(body.class_session_id))
+        ? next()
+        : deny();
+    }
+
+    // =============================================
+    // EXAM CREATION & QUESTION MANAGEMENT
+    // =============================================
+
+    if (
+      method === "POST" &&
+      route === "/teacher/exams"
+    ) {
+      return (await courseAccess(body.course_id))
+        ? next()
+        : deny();
+    }
+
+    if (
+      method === "POST" &&
+      route === "/teacher/exam-questions"
+    ) {
+      return (await examAccess(body.exam_id))
+        ? next()
+        : deny();
+    }
+
+    const examQuestions = route.match(
+      /^\/teacher\/exam-questions\/(\d+)\/(\d+)$/
+    );
+
+    if (method === "GET" && examQuestions) {
+      if (!ownId(examQuestions[2])) return deny();
+
+      return (await examAccess(examQuestions[1]))
+        ? next()
+        : deny();
+    }
+
+    // =============================================
+    // EXAM RESULTS, PUBLISHING & EXTENSIONS
+    // =============================================
+
+    const examResultStudents = route.match(
+      /^\/teacher\/exam-results\/(\d+)\/(\d+)$/
+    );
+
+    if (method === "GET" && examResultStudents) {
+      if (!ownId(examResultStudents[2])) return deny();
+
+      return (await examAccess(examResultStudents[1]))
+        ? next()
+        : deny();
+    }
+
+    const examOperation = route.match(
+      /^\/teacher\/exams\/(\d+)\/(settings|publish|publish-results|reschedule)$/
+    );
+
+    if (examOperation && method === "PUT") {
+      return (await examAccess(examOperation[1]))
+        ? next()
+        : deny();
+    }
+
+    const submittedAttempts = route.match(
+      /^\/teacher\/exams\/(\d+)\/submitted-attempts\/(\d+)$/
+    );
+
+    if (method === "GET" && submittedAttempts) {
+      if (!ownId(submittedAttempts[2])) return deny();
+
+      return (await examAccess(submittedAttempts[1]))
+        ? next()
+        : deny();
+    }
+
+    const reviewAttempt = route.match(
+      /^\/teacher\/exam-attempts\/(\d+)\/review\/(\d+)$/
+    );
+
+    if (method === "GET" && reviewAttempt) {
+      if (!ownId(reviewAttempt[2])) return deny();
+
+      return (await attemptAccess(reviewAttempt[1]))
+        ? next()
+        : deny();
+    }
+
+    const gradeAttempt = route.match(
+      /^\/teacher\/exam-attempts\/(\d+)\/grade-answer$/
+    );
+
+    if (method === "PUT" && gradeAttempt) {
+      return (await attemptAccess(gradeAttempt[1]))
+        ? next()
+        : deny();
+    }
+
+    if (
+      method === "POST" &&
+      route === "/teacher/exam-results"
+    ) {
+      return (await examAccess(body.exam_id))
+        ? next()
+        : deny();
+    }
+
+    const feedbackRoute = route.match(
+      /^\/teacher\/exam-results\/(\d+)\/(\d+)\/feedback$/
+    );
+
+    if (method === "PUT" && feedbackRoute) {
+      return (await examAccess(feedbackRoute[1]))
+        ? next()
+        : deny();
+    }
+
+    const extensionRoute = route.match(
+      /^\/teacher\/exams\/(\d+)\/extensions\/(\d+)$/
+    );
+
+    if (extensionRoute) {
+      const examId = extensionRoute[1];
+      const secondId = extensionRoute[2];
+
+      if (method === "GET" && !ownId(secondId)) {
+        return deny();
+      }
+
+      if (method !== "GET" && method !== "PUT") {
+        return deny();
+      }
+
+      // PUT secondId is studentId, not teacherId.
+      return (await examAccess(examId))
+        ? next()
+        : deny();
+    }
+
+    // =============================================
+    // ASSIGNMENT MARKS VIEW
+    // =============================================
+
+    const assignmentMarks = route.match(
+      /^\/teacher\/batches\/(\d+)\/assignment-marks\/(\d+)$/
+    );
+
+    if (method === "GET" && assignmentMarks) {
+      if (!ownId(assignmentMarks[2])) return deny();
+
+      return (await batchAccess(assignmentMarks[1]))
+        ? next()
+        : deny();
+    }
+
+    // Unrecognized instructor API: DENY BY DEFAULT.
+    return res.status(403).json({
+      message: "Instructor route needs authorization policy."
+    });
+
+  } catch (error) {
+    console.error("Instructor authorization error:", error);
+
+    return res.status(500).json({
+      message: "Instructor authorization failed."
+    });
+  }
+};
+
+// Apply before instructor API handlers.
+app.use(
+  ["/api/teacher", "/api/instructor"],
+  authenticateToken,
+  instructorSecurity
+);
+
+
+const campus95SecurityGate = async (req, res, next) => {
+  const apiPath = req.path;
+  const method = req.method.toUpperCase();
+
+  if (!apiPath.startsWith("/api/")) {
+    return next();
+  }
+
+  // Never expose database debugging information.
+  if (apiPath === "/api/debug/database") {
+    return res.status(404).json({
+      message: "Not found."
+    });
+  }
+
+  // Rollout safety switch.
+  if (!ENFORCE_LMS_AUTH) {
+    return next();
+  }
+
+  // Only these API routes are public.
+  const publicRoutes = new Set([
+    "POST /api/login",
+    "POST /api/register",
+    "POST /api/auth/verify-email",
+    "POST /api/auth/resend-otp",
+    "GET /api/payment-settings",
+    "GET /api/student/courses",
+  ]);
+
+  if (publicRoutes.has(`${method} ${apiPath}`)) {
+    return next();
+  }
+
+  // Token verification; the middleware reads the DB user.
+  authenticateToken(req, res, async () => {
+    try {
+      const user = req.user;
+
+      if (!user) {
+        return res.status(401).json({
+          message: "Authentication required."
+        });
+      }
+
+      const role = user.role;
+      const userId = user.id;
+
+      const deny = () =>
+        res.status(403).json({
+          message: "Access denied."
+        });
+
+      
+// Instructor may view students only in assigned batches.
+const attendanceRosterMatch = apiPath.match(
+  /^\/api\/admin\/class-batch-students\/(\d+)$/
+);
+
+if (
+  method === "GET" &&
+  attendanceRosterMatch &&
+  role === "instructor"
+) {
+  const allowed = await checkTeacherBatchAccess(
+    attendanceRosterMatch[1],
+    userId
+  );
+
+  if (!allowed) return deny();
+
+  return next();
+}
+
+
+      // ========== ADMIN ROUTES ==========
+
+      if (apiPath.startsWith("/api/admin/")) {
+        return role === "admin" ? next() : deny();
+      }
+
+      // Admin-managed student and teacher lists.
+      if (
+        apiPath === "/api/students" ||
+        apiPath === "/api/teachers"
+      ) {
+        return role === "admin" ? next() : deny();
+      }
+
+      // ========== STUDENT ROUTES ==========
+
+      if (apiPath.startsWith("/api/student/")) {
+        if (role !== "student" && role !== "admin") {
+          return deny();
+        }
+
+        // Admin can access student records.
+        if (role === "admin") return next();
+
+        // Student IDs supplied as URL parameters.
+        const studentIdPaths = [
+          /^\/api\/student\/(\d+)$/,
+          /^\/api\/student\/dashboard\/(\d+)$/,
+          /^\/api\/student\/update-profile\/(\d+)$/,
+          /^\/api\/student\/enrolled-batches\/(\d+)$/,
+          /^\/api\/student\/assignments\/(\d+)$/,
+          /^\/api\/student\/class-schedules\/(\d+)$/,
+          /^\/api\/student\/attendance\/(\d+)$/,
+          /^\/api\/student\/exams\/(\d+)$/,
+          /^\/api\/student\/exam-attempt-statuses\/(\d+)$/,
+        ];
+
+        for (const pattern of studentIdPaths) {
+          const match = apiPath.match(pattern);
+
+          if (
+            match &&
+            !sameSecurityId(match[1], userId)
+          ) {
+            return deny();
+          }
+        }
+
+        // Student ID inside JSON or multipart form data.
+        // Multipart is parsed later by multer, so enrollment
+        // ownership must ALSO be checked inside that handler.
+        const bodyStudentId =
+          req.body?.student_id ?? req.body?.studentId;
+
+        if (
+          bodyStudentId !== undefined &&
+          !sameSecurityId(bodyStudentId, userId)
+        ) {
+          return deny();
+        }
+
+        // Attempt ownership.
+        const attemptMatch = apiPath.match(
+          /^\/api\/student\/exam-attempts\/(\d+)(?:\/.*)?$/
+        );
+
+        if (attemptMatch) {
+          const ownsAttempt =
+            await checkStudentAttemptOwnership(
+              attemptMatch[1],
+              userId
+            );
+
+          if (!ownsAttempt) return deny();
+        }
+
+        // Exam enrollment.
+        const startMatch = apiPath.match(
+          /^\/api\/student\/exams\/(\d+)\/start$/
+        );
+
+        if (startMatch) {
+          const enrolled =
+            await checkStudentExamEnrollment(
+              startMatch[1],
+              userId
+            );
+
+          if (!enrolled) return deny();
+        }
+
+        return next();
+      }
+
+      // ========== INSTRUCTOR ROUTES ==========
+
+      if (
+        apiPath.startsWith("/api/teacher/") ||
+        apiPath.startsWith("/api/instructor/")
+      ) {
+        if (role !== "instructor" && role !== "admin") {
+          return deny();
+        }
+
+        if (role === "admin") return next();
+
+        // Match URL parameters that identify the instructor.
+        const teacherIdPatterns = [
+          /^\/api\/teacher\/dashboard\/(\d+)$/,
+          /^\/api\/teacher\/(\d+)$/,
+          /^\/api\/teacher\/update-profile\/(\d+)$/,
+          /^\/api\/teacher\/assignment-batches\/(\d+)$/,
+          /^\/api\/teacher\/assignments\/(\d+)$/,
+          /^\/api\/teacher\/class-schedules\/(\d+)$/,
+          /^\/api\/teacher\/courses\/(\d+)$/,
+          /^\/api\/teacher\/exams\/(\d+)$/,
+          /^\/api\/instructor\/batches\/(\d+)$/,
+          /^\/api\/teacher\/exam-results\/\d+\/(\d+)$/,
+          /^\/api\/teacher\/exam-questions\/\d+\/(\d+)$/,
+          /^\/api\/teacher\/assignment-submissions\/\d+\/(\d+)$/,
+          /^\/api\/teacher\/exam-attempts\/\d+\/review\/(\d+)$/,
+          /^\/api\/teacher\/exams\/\d+\/submitted-attempts\/(\d+)$/,
+          /^\/api\/teacher\/exams\/\d+\/extensions\/(\d+)$/,
+          /^\/api\/teacher\/batches\/\d+\/assignment-marks\/(\d+)$/,
+        ];
+
+        for (const pattern of teacherIdPatterns) {
+          const match = apiPath.match(pattern);
+
+          if (
+            match &&
+            !sameSecurityId(match[1], userId)
+          ) {
+            return deny();
+          }
+        }
+
+        const bodyTeacherId =
+          req.body?.teacher_id ??
+          req.body?.instructor_id;
+
+        if (
+          bodyTeacherId !== undefined &&
+          !sameSecurityId(bodyTeacherId, userId)
+        ) {
+          return deny();
+        }
+
+        // Direct exam ownership.
+        const examMatch = apiPath.match(
+          /^\/api\/teacher\/exams\/(\d+)\/(?:settings|publish|publish-results|reschedule|extensions\/.*)$/
+        );
+
+        if (examMatch) {
+          const ownsExam =
+            await checkTeacherExamOwnership(
+              examMatch[1],
+              userId
+            );
+
+          if (!ownsExam) return deny();
+        }
+
+        // Grading/review attempt ownership.
+        const attemptMatch = apiPath.match(
+          /^\/api\/teacher\/exam-attempts\/(\d+)(?:\/.*)?$/
+        );
+
+        if (attemptMatch) {
+          const ownsAttempt =
+            await checkTeacherAttemptOwnership(
+              attemptMatch[1],
+              userId
+            );
+
+          if (!ownsAttempt) return deny();
+        }
+
+        // Batch access.
+        const batchMatch = apiPath.match(
+          /^\/api\/(?:teacher\/batches|instructor\/batch-students)\/(\d+)(?:\/.*)?$/
+        );
+
+        if (batchMatch) {
+          const assigned =
+            await checkTeacherBatchAccess(
+              batchMatch[1],
+              userId
+            );
+
+          if (!assigned) return deny();
+        }
+
+        // Assignment submission access.
+        const assignmentMatch = apiPath.match(
+          /^\/api\/teacher\/assignment-submissions\/(\d+)\/\d+$/
+        );
+
+        if (assignmentMatch) {
+          const assigned =
+            await checkTeacherAssignmentAccess(
+              assignmentMatch[1],
+              userId
+            );
+
+          if (!assigned) return deny();
+        }
+
+        return next();
+      }
+
+      // Public catalog endpoints that require login.
+      if (apiPath.startsWith("/api/course-batches/")) {
+        return next();
+      }
+
+      // Fail closed for any other API not explicitly mapped.
+      return res.status(403).json({
+        message: "This API route needs a security policy."
+      });
+    } catch (error) {
+      console.error("Security gate error:", error);
+
+      return res.status(500).json({
+        message: "Authorization check failed."
+      });
+    }
+  });
+};
+
+
+/* ================================================
+   CAMPUS 95 — REMAINING API LOCKDOWN
+   ================================================ */
+
+const campus95FinalApiGuard = (req, res, next) => {
+  const route = req.path;
+  const method = req.method.toUpperCase();
+
+  // Disable diagnostic endpoints.
+  if (
+    route === "/debug/database" ||
+    route === "/test-route"
+  ) {
+    return res.status(404).json({
+      message: "Not found."
+    });
+  }
+
+  // Explicit public routes.
+  const publicRoutes = new Set([
+    "POST /login",
+    "POST /register",
+    "POST /auth/verify-email",
+    "POST /auth/resend-otp",
+    "GET /payment-settings",
+    "GET /student/courses"
+  ]);
+
+  if (publicRoutes.has(`${method} ${route}`)) {
+    return next();
+  }
+
+  // Admin / Student / Instructor routes are protected
+  // by their independently registered security guards.
+  
+  // Admin-only student and teacher listings.
+  // These URLs do not start with /admin,
+  // so the final guard must handle them explicitly.
+  if (
+    method === "GET" &&
+    (route === "/students" || route === "/teachers")
+  ) {
+    return authenticateToken(req, res, () => {
+      return authorizeRoles("admin")(req, res, next);
+    });
+  }
+
+  if (
+    route.startsWith("/admin/") ||
+    route.startsWith("/student/") ||
+    route.startsWith("/teacher/") ||
+    route.startsWith("/instructor/")
+  ) {
+    return next();
+  }
+
+  // Shared course batches require authenticated access.
+  if (
+    method === "GET" &&
+    /^\/course-batches\/\d+$/.test(route)
+  ) {
+    if (req.user) return next();
+
+    return authenticateToken(req, res, next);
+  }
+
+  // Unknown API endpoints are denied.
+  return res.status(403).json({
+    message: "API route is not authorized."
+  });
+};
+
+app.use("/api", campus95FinalApiGuard);
+
+app.use(campus95SecurityGate);
+
+/* =================================================
+   ADMIN — VIEW PAYMENT RECEIPT (PROTECTED)
+   ================================================= */
+
+app.get(
+  "/api/admin/payment-receipt/:enrollmentId",
+  authenticateToken,
+  authorizeRoles("admin"),
+  (req, res) => {
+
+    const enrollmentId = Number(req.params.enrollmentId);
+
+    if (
+      !Number.isSafeInteger(enrollmentId) ||
+      enrollmentId <= 0
+    ) {
+      return res.status(400).json({
+        message: "Invalid enrollment ID."
+      });
+    }
+
+    db.query(
+      `SELECT payment_proof
+       FROM course_enrollments
+       WHERE id = ?`,
+      [enrollmentId],
+      (err, results) => {
+
+        if (err) {
+          return res.status(500).json({
+            message: "Database error."
+          });
+        }
+
+        if (!results.length || !results[0].payment_proof) {
+          return res.status(404).json({
+            message: "Receipt not found."
+          });
+        }
+
+        const filename = results[0].payment_proof;
+
+        if (
+          !/^[a-f0-9-]{36}\.(jpg|png|pdf)$/.test(filename)
+        ) {
+          return res.status(404).json({
+            message: "Valid receipt not found."
+          });
+        }
+
+        return res.sendFile(filename, {
+          root: receiptDirectory
+        });
+      }
+    );
+  }
+);
+
+
 
 const sendVerificationCode = async (user) => {
   const otp = makeOtp();
@@ -439,14 +1890,17 @@ app.post('/api/login', async (req, res) => {
   }
 
   try {
-    const users = await authQuery(
-      `SELECT id, name, email, password,
-              role, status, email_verified
-       FROM users
-       WHERE email = ?
-       LIMIT 1`,
-      [email]
-    );
+    
+const users = await authQuery(
+  `SELECT id, name, email, password,
+          role, status, email_verified
+   FROM users
+   WHERE email = ?
+     AND is_deleted = 0
+   LIMIT 1`,
+  [email]
+);
+
 
     if (!users.length) {
       return res.status(401).json({
@@ -533,22 +1987,96 @@ app.post('/api/login', async (req, res) => {
 
 
 
-// ================= ADMIN MANAGEMENT APIs =================
 
-app.get('/api/admin/pending-users', (req, res) => {
-  db.query("SELECT id, name, email, role, status FROM users WHERE status = 'pending'", (err, results) => {
-    if (err) return res.status(500).json({ message: 'Database error', error: err });
-    res.json(results);
-  });
-});
+/* =================================================
+   ADMIN — GET PENDING USERS (PROTECTED)
+   ================================================= */
 
-app.put('/api/admin/approve-user/:id', (req, res) => {
-  const userId = req.params.id;
-  db.query("UPDATE users SET status = 'approved' WHERE id = ? AND email_verified = 1", [userId], (err, result) => {
-    if (err) return res.status(500).json({ message: 'Database error', error: err });
-    res.json({ message: 'User approved successfully!' });
-  });
-});
+app.get(
+  "/api/admin/pending-users",
+  authenticateToken,
+  authorizeRoles("admin"),
+  (req, res) => {
+
+    const sql = `
+      SELECT
+        id,
+        name,
+        email,
+        role,
+        status,
+        email_verified
+      FROM users
+      WHERE status = 'pending'
+      ORDER BY id DESC
+    `;
+
+    db.query(sql, (err, results) => {
+      if (err) {
+        console.error("Pending users error:", err);
+
+        return res.status(500).json({
+          message: "Failed to load pending users."
+        });
+      }
+
+      return res.json(results);
+    });
+  }
+);
+
+
+/* =================================================
+   ADMIN — APPROVE USER (PROTECTED)
+   ================================================= */
+
+app.put(
+  "/api/admin/approve-user/:id",
+  authenticateToken,
+  authorizeRoles("admin"),
+  (req, res) => {
+
+    const userId = Number(req.params.id);
+
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+      return res.status(400).json({
+        message: "Invalid user ID."
+      });
+    }
+
+    const sql = `
+      UPDATE users
+      SET status = 'approved'
+      WHERE id = ?
+        AND role IN ('student', 'instructor')
+        AND email_verified = 1
+        AND status = 'pending'
+    `;
+
+    db.query(sql, [userId], (err, result) => {
+
+      if (err) {
+        console.error("Approve user error:", err);
+
+        return res.status(500).json({
+          message: "Failed to approve user."
+        });
+      }
+
+      if (result.affectedRows === 0) {
+        return res.status(409).json({
+          message:
+            "User not found, not pending, or email not verified."
+        });
+      }
+
+      return res.json({
+        message: "User approved successfully!"
+      });
+    });
+  }
+);
+
 
 
 /* ========== ADMIN DASHBOARD REAL STATISTICS ========== */
@@ -607,7 +2135,7 @@ app.get('/api/admin/stats', (req, res) => {
 // ================= TEACHERS MODULE APIs =================
 
 app.get('/api/teachers', (req, res) => {
-  const query = "SELECT id, name, email, phone, qualification, specialisation, department, profile_photo, role, status FROM users WHERE role = 'instructor'";
+  const query = "SELECT id, name, email, phone, qualification, specialisation, department, profile_photo, role, status FROM users WHERE role = 'instructor' AND is_deleted = 0";
   db.query(query, (err, results) => {
     if (err) return res.status(500).json({ message: "Database error", error: err });
 
@@ -891,13 +2419,6 @@ app.get('/api/teacher/:id', (req, res) => {
   );
 });
 
-app.get('/api/teacher/:id', (req, res) => {
-  const teacherId = req.params.id;
-  db.query("SELECT id, name, email, phone, qualification, specialisation, department, profile_photo, role, status FROM users WHERE id = ? AND role = 'instructor'", [teacherId], (err, results) => {
-    if (err || results.length === 0) return res.status(404).json({ message: "Teacher not found" });
-    res.json(results[0]);
-  });
-});
 
 app.put('/api/teacher/update-profile/:id', (req, res) => {
   const teacherId = req.params.id;
@@ -927,11 +2448,95 @@ app.put('/api/admin/update-teacher/:id', (req, res) => {
   });
 });
 
+/* ============================================
+   ADMIN — ARCHIVE STUDENT OR INSTRUCTOR
+   ============================================ */
+
+app.delete(
+  "/api/admin/delete-user/:id",
+  authenticateToken,
+  authorizeRoles("admin"),
+  async (req, res) => {
+    const userId = Number(req.params.id);
+
+    if (
+      !Number.isSafeInteger(userId) ||
+      userId <= 0
+    ) {
+      return res.status(400).json({
+        message: "Invalid user ID."
+      });
+    }
+
+    try {
+      const users = await authQuery(
+        `SELECT id, name, role, is_deleted
+         FROM users
+         WHERE id = ?
+         LIMIT 1`,
+        [userId]
+      );
+
+      if (!users.length) {
+        return res.status(404).json({
+          message: "User not found."
+        });
+      }
+
+      const user = users[0];
+
+      // Never delete administrators from this API.
+      if (!["student", "instructor"].includes(user.role)) {
+        return res.status(403).json({
+          message:
+            "Only Student and Instructor accounts can be removed."
+        });
+      }
+
+      if (Number(user.is_deleted) === 1) {
+        return res.status(409).json({
+          message: "This account is already removed."
+        });
+      }
+
+      const result = await authQuery(
+        `UPDATE users
+         SET is_deleted = 1
+         WHERE id = ?
+           AND role IN ('student', 'instructor')
+           AND is_deleted = 0`,
+        [userId]
+      );
+
+      if (result.affectedRows !== 1) {
+        return res.status(409).json({
+          message: "Unable to remove this account."
+        });
+      }
+
+      return res.json({
+        message: `${user.role === "student"
+          ? "Student"
+          : "Teacher"} account removed successfully.`,
+        user_id: userId,
+        removed: true
+      });
+
+    } catch (error) {
+      console.error("Admin remove user error:", error);
+
+      return res.status(500).json({
+        message: "Failed to remove user."
+      });
+    }
+  }
+);
+
 
 // ================= STUDENTS MODULE APIs =================
 
 app.get('/api/students', (req, res) => {
-  const query = "SELECT id, name, email, phone, qualification, department, program, semester, cgpa, profile_photo, role, status FROM users WHERE role = 'student' AND status = 'approved'";
+  const query = "SELECT id, name, email, phone, qualification, department, program, semester, cgpa, profile_photo, role, status FROM users WHERE role = 'student' AND status = 'approved' AND is_deleted = 0";
   db.query(query, (err, results) => {
     if (err) return res.status(500).json({ message: "Database error", error: err });
 
@@ -1571,7 +3176,10 @@ app.get('/api/payment-settings', (req, res) => {
 
 // STUDENT - Submit Enrollment with Payment Proof
 // STUDENT - Enroll with Payment Receipt
-app.post('/api/student/enroll-batch', (req, res) => {
+app.post('/api/student/enroll-batch',
+  authenticateToken,
+  authorizeRoles("student"),
+  (req, res) => {
 
   receiptUpload.single('receipt')(req, res, (uploadErr) => {
 
@@ -1623,6 +3231,15 @@ app.post('/api/student/enroll-batch', (req, res) => {
         message: "Invalid student or batch ID."
       });
     }
+
+    // SECURITY: Student can enroll only themselves.
+if (studentId !== req.user.id) {
+  removeReceipt();
+
+  return res.status(403).json({
+    message: "You cannot enroll another student."
+  });
+}
 
     const paymentQuery = `
       SELECT id FROM payment_settings
@@ -2066,6 +3683,144 @@ app.get('/api/teacher/assignment-submissions/:assignmentId/:teacherId', (req, re
     res.json(results);
   });
 });
+
+
+/* ==============================================
+   INSTRUCTOR — SAVE / UPDATE ASSIGNMENT GRADE
+   ============================================== */
+
+app.post(
+  "/api/teacher/grade-submission",
+  authenticateToken,
+  authorizeRoles("instructor"),
+  async (req, res) => {
+    const assignmentId = Number(req.body?.assignment_id);
+    const studentId = Number(req.body?.student_id);
+    const teacherId = Number(req.user?.id);
+    const marks = Number(req.body?.marks_obtained);
+    const feedback = req.body?.feedback;
+
+    if (
+      !Number.isSafeInteger(assignmentId) ||
+      assignmentId <= 0 ||
+      !Number.isSafeInteger(studentId) ||
+      studentId <= 0 ||
+      !Number.isSafeInteger(teacherId) ||
+      teacherId <= 0 ||
+      req.body?.marks_obtained === null ||
+      req.body?.marks_obtained === "" ||
+      !Number.isFinite(marks) ||
+      typeof feedback !== "string" ||
+      feedback.length > 5000
+    ) {
+      return res.status(400).json({
+        message: "Invalid grading information."
+      });
+    }
+
+    // Never trust teacher_id supplied by frontend.
+    if (
+      req.body?.teacher_id !== undefined &&
+      Number(req.body.teacher_id) !== teacherId
+    ) {
+      return res.status(403).json({
+        message: "Instructor identity mismatch."
+      });
+    }
+
+    try {
+      const rows = await authQuery(
+        `SELECT
+           s.id AS submission_id,
+           a.total_marks
+         FROM assignment_submissions s
+         JOIN assignments a
+           ON a.id = s.assignment_id
+         JOIN course_batches cb
+           ON cb.id = a.course_batch_id
+         WHERE s.assignment_id = ?
+           AND s.student_id = ?
+           AND (
+             cb.instructor_id = ?
+             OR EXISTS (
+               SELECT 1
+               FROM batch_instructors bi
+               WHERE bi.batch_id = cb.id
+                 AND bi.instructor_id = ?
+             )
+           )
+           AND EXISTS (
+             SELECT 1
+             FROM course_enrollments ce
+             WHERE ce.course_batch_id = a.course_batch_id
+               AND ce.student_id = s.student_id
+               AND ce.status = 'Active'
+           )
+         ORDER BY s.id DESC
+         LIMIT 1`,
+        [assignmentId, studentId, teacherId, teacherId]
+      );
+
+      if (!rows.length) {
+        return res.status(404).json({
+          message:
+            "Submission not found or not assigned to this instructor."
+        });
+      }
+
+      const submission = rows[0];
+      const maximum = Number(submission.total_marks);
+
+      if (
+        !Number.isFinite(maximum) ||
+        marks < 0 ||
+        marks > maximum
+      ) {
+        return res.status(400).json({
+          message: `Marks must be between 0 and ${maximum}.`
+        });
+      }
+
+      const result = await authQuery(
+        `UPDATE assignment_submissions
+         SET marks_obtained = ?,
+             feedback = ?,
+             status = 'Graded'
+         WHERE id = ?
+           AND assignment_id = ?
+           AND student_id = ?`,
+        [
+          marks,
+          feedback.trim(),
+          submission.submission_id,
+          assignmentId,
+          studentId
+        ]
+      );
+
+      if (result.affectedRows !== 1) {
+        return res.status(409).json({
+          message: "Grade could not be saved."
+        });
+      }
+
+      return res.json({
+        message: "Grade saved successfully.",
+        submission_id: submission.submission_id,
+        marks_obtained: marks,
+        feedback: feedback.trim(),
+        status: "Graded"
+      });
+
+    } catch (error) {
+      console.error("Assignment grading error:", error);
+
+      return res.status(500).json({
+        message: "Unable to save assignment grade."
+      });
+    }
+  }
+);
 
 
 app.get('/api/admin/course-instructors/:courseId', (req, res) => {
@@ -3040,7 +4795,9 @@ app.post('/api/teacher/exams', (req, res) => {
         attempt_limit,
         result_published
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'Offline', 1, 0)
+      
+VALUES (?, ?, ?, ?, ?, ?, ?, 'Online', 1, 0)
+
     `;
 
     db.query(
@@ -3417,7 +5174,8 @@ app.put('/api/teacher/exams/:examId/settings', (req, res) => {
   if (
     !Number.isSafeInteger(examId) || examId <= 0 ||
     !Number.isSafeInteger(teacherId) || teacherId <= 0 ||
-    !['Online', 'Offline'].includes(exam_mode) ||
+    exam_mode !== 'Online' ||
+
     !Number.isInteger(attempts) || attempts < 1 ||
     attempts > 10 ||
     (exam_mode === 'Online' &&
@@ -5163,6 +6921,13 @@ app.put(
 /* ========== INSTRUCTOR: SAVE OFFLINE EXAM RESULTS ========== */
 
 app.post('/api/teacher/exam-results', (req, res) => {
+  
+  return res.status(410).json({
+    message:
+      "Offline exam marks entry is no longer supported. " +
+      "Use online exam attempts and grading."
+  });
+
   const teacherId = Number(req.body?.teacher_id);
   const examId = Number(req.body?.exam_id);
   const results = req.body?.results_data;
@@ -5531,6 +7296,14 @@ app.put(
           }
 
           const exam = examRows[0];
+          
+if (exam.exam_mode !== "Online") {
+  return fail(
+    409,
+    "Only Online Exam results can be published."
+  );
+}
+
 
           if (exam.exam_status !== 'Published') {
             return fail(
@@ -8172,6 +9945,6 @@ app.get(
 // START SERVER
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
 });

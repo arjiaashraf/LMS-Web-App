@@ -6,6 +6,7 @@ import {
   PlusCircle,
   Eye
 } from "lucide-react";
+import { apiFetch as fetch } from "../services/api";
 
 type Course = {
   id: number;

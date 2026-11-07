@@ -1,6 +1,8 @@
 
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
+import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
+import { apiFetch } from "../services/api";
 import {
   Video,
   Plus,
@@ -12,6 +14,7 @@ import {
   ArrowLeft,
   X,
   BookOpen,
+  RefreshCw,
 } from "lucide-react";
 
 type Course = {
@@ -23,6 +26,12 @@ type Course = {
   end_time: string;
 };
 
+type ClassStatus =
+  | "Scheduled"
+  | "Completed"
+  | "Cancelled"
+  | "Rescheduled";
+
 type ClassSchedule = {
   id: number;
   course_id: number;
@@ -33,18 +42,78 @@ type ClassSchedule = {
   end_time: string;
   time_zone: string;
   meeting_link: string;
-  status: "Scheduled" | "Completed" | "Cancelled" | "Rescheduled";
+  status: ClassStatus;
 };
 
 interface InstructorOnlineClassesProps {
   onBack?: () => void;
 }
 
+async function parseResponse(response: Response) {
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(
+      data.message ||
+        `Request failed (${response.status}).`
+    );
+  }
+
+  return data;
+}
+
+function getInstructorId(): number | null {
+  try {
+    const user = JSON.parse(
+      localStorage.getItem("user") || "{}"
+    );
+
+    const id = Number(user.id);
+
+    if (
+      user.role !== "instructor" ||
+      typeof user.token !== "string" ||
+      !user.token ||
+      !Number.isSafeInteger(id) ||
+      id <= 0
+    ) {
+      return null;
+    }
+
+    return id;
+  } catch {
+    return null;
+  }
+}
+
+function formatTime(time: string) {
+  if (!time) return "—";
+
+  const [hours, minutes] = time.split(":").map(Number);
+
+  if (
+    !Number.isFinite(hours) ||
+    !Number.isFinite(minutes)
+  ) {
+    return time;
+  }
+
+  const period = hours >= 12 ? "PM" : "AM";
+  const hour12 = hours % 12 || 12;
+
+  return `${hour12}:${String(minutes).padStart(2, "0")} ${period}`;
+}
+
 function InstructorOnlineClasses({
   onBack,
 }: InstructorOnlineClassesProps) {
+  const navigate = useNavigate();
+
+  const [instructorId] = useState(getInstructorId);
+
   const [classes, setClasses] = useState<ClassSchedule[]>([]);
   const [courses, setCourses] = useState<Course[]>([]);
+
   const [showModal, setShowModal] = useState(false);
 
   const [courseId, setCourseId] = useState("");
@@ -54,92 +123,156 @@ function InstructorOnlineClasses({
   const [endTime, setEndTime] = useState("");
   const [timeZone, setTimeZone] = useState("PKT");
   const [meetingLink, setMeetingLink] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const navigate = useNavigate();
-  const user = JSON.parse(localStorage.getItem("user") || "{}");
-  const instructorId = user.id;
+  const [loading, setLoading] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [updatingId, setUpdatingId] = useState<number | null>(
+    null
+  );
+
+  const [error, setError] = useState("");
+  const [courseError, setCourseError] = useState("");
+
+  // =====================================
+  // FETCH ASSIGNED COURSES AND BATCHES
+  // =====================================
+
+  const fetchInstructorCourses = useCallback(async () => {
+    if (!instructorId) return;
+
+    setCourseError("");
+
+    try {
+      const response = await apiFetch(
+        `/api/teacher/assignment-batches/${instructorId}`
+      );
+
+      const data = await parseResponse(response);
+
+      if (!Array.isArray(data)) {
+        throw new Error("Invalid assigned batches response.");
+      }
+
+      setCourses(data);
+    } catch (err) {
+      setCourseError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load assigned batches."
+      );
+    }
+  }, [instructorId]);
+
+  // =====================================
+  // FETCH ALL SCHEDULED CLASSES
+  // =====================================
+
+  const fetchClassSchedules = useCallback(async () => {
+    if (!instructorId) return;
+
+    setLoading(true);
+    setError("");
+
+    try {
+      const response = await apiFetch(
+        `/api/teacher/class-schedules/${instructorId}`
+      );
+
+      const data = await parseResponse(response);
+
+      if (!Array.isArray(data)) {
+        throw new Error("Invalid class schedules response.");
+      }
+
+      setClasses(data);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to load online classes."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [instructorId]);
 
   useEffect(() => {
-    if (!instructorId || user.role !== "instructor") {
-      navigate("/login");
+    if (!instructorId) {
+      navigate("/login", { replace: true });
       return;
     }
 
-    fetchInstructorCourses();
-    fetchClassSchedules();
-  }, [navigate, instructorId]);
+    void fetchInstructorCourses();
+    void fetchClassSchedules();
+  }, [
+    instructorId,
+    navigate,
+    fetchInstructorCourses,
+    fetchClassSchedules,
+  ]);
 
-  // FORMAT TIME INTO AM / PM
-  const formatTime = (time: string) => {
-    if (!time) return "";
-
-    const [hours, minutes] = time.split(":").map(Number);
-    const period = hours >= 12 ? "PM" : "AM";
-    const hour12 = hours % 12 || 12;
-
-    return `${hour12}:${String(minutes).padStart(2, "0")} ${period}`;
+  const refreshAll = async () => {
+    await Promise.all([
+      fetchInstructorCourses(),
+      fetchClassSchedules(),
+    ]);
   };
 
-  // FETCH ASSIGNED COURSES AND BATCHES
-  const fetchInstructorCourses = async () => {
-    try {
-      const res = await fetch(
-        `http://localhost:5000/api/teacher/assignment-batches/${instructorId}`
-      );
-
-      const data = await res.json();
-
-      if (res.ok) {
-        setCourses(data);
-      } else {
-        console.error("Failed to fetch batches:", data);
-      }
-    } catch (err) {
-      console.error("Error fetching instructor batches:", err);
-    }
+  const resetForm = () => {
+    setCourseId("");
+    setBatchId("");
+    setSessionDate("");
+    setStartTime("");
+    setEndTime("");
+    setTimeZone("PKT");
+    setMeetingLink("");
   };
 
-  // FETCH SCHEDULED CLASSES
-  const fetchClassSchedules = async () => {
-    try {
-      const res = await fetch(
-        `http://localhost:5000/api/teacher/class-schedules/${instructorId}`
-      );
-
-      const data = await res.json();
-
-      if (res.ok) {
-        setClasses(data);
-      } else {
-        console.error("Failed to fetch schedules:", data);
-      }
-    } catch (err) {
-      console.error("Error fetching schedules:", err);
-    }
-  };
-
+  // =====================================
   // CREATE ONLINE CLASS
+  // =====================================
+
   const handleCreateClass = async (
-    e: React.FormEvent<HTMLFormElement>
+    event: FormEvent<HTMLFormElement>
   ) => {
-    e.preventDefault();
+    event.preventDefault();
+
+    if (!instructorId || isSubmitting) return;
 
     if (!courseId || !batchId) {
-      alert("Please select a course and batch.");
+      window.alert("Please select an assigned course and batch.");
+      return;
+    }
+
+    if (!sessionDate || !startTime || !endTime) {
+      window.alert("Please enter class date and time.");
       return;
     }
 
     if (startTime >= endTime) {
-      alert("End time must be after start time.");
+      window.alert("End time must be after start time.");
+      return;
+    }
+
+    try {
+      const url = new URL(meetingLink.trim());
+
+      if (
+        url.protocol !== "https:" &&
+        url.protocol !== "http:"
+      ) {
+        throw new Error();
+      }
+    } catch {
+      window.alert("Please enter a valid meeting URL.");
       return;
     }
 
     setIsSubmitting(true);
 
     try {
-      const res = await fetch(
-        "http://localhost:5000/api/teacher/class-schedule",
+      const response = await apiFetch(
+        "/api/teacher/class-schedule",
         {
           method: "POST",
           headers: {
@@ -148,50 +281,61 @@ function InstructorOnlineClasses({
           body: JSON.stringify({
             course_id: Number(courseId),
             course_batch_id: Number(batchId),
-            instructor_id: Number(instructorId),
+            instructor_id: instructorId,
             session_date: sessionDate,
             start_time: startTime,
             end_time: endTime,
-            time_zone: timeZone,
-            meeting_link: meetingLink,
+            time_zone: timeZone.trim() || "PKT",
+            meeting_link: meetingLink.trim(),
           }),
         }
       );
 
-      const data = await res.json();
+      await parseResponse(response);
 
-      if (res.ok) {
-        alert("Online class scheduled successfully!");
+      setShowModal(false);
+      resetForm();
 
-        setShowModal(false);
-        setCourseId("");
-        setBatchId("");
-        setSessionDate("");
-        setStartTime("");
-        setEndTime("");
-        setTimeZone("PKT");
-        setMeetingLink("");
+      window.alert("Online class scheduled successfully!");
 
-        fetchClassSchedules();
-      } else {
-        alert(data.message || "Failed to schedule class.");
-      }
+      await fetchClassSchedules();
     } catch (err) {
-      console.error("Error scheduling class:", err);
-      alert("Server error while scheduling class.");
+      window.alert(
+        err instanceof Error
+          ? err.message
+          : "Unable to schedule online class."
+      );
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // UPDATE CLASS STATUS
+  // =====================================
+  // MARK COMPLETED / CANCEL CLASS
+  // =====================================
+
   const handleStatusUpdate = async (
     scheduleId: number,
     newStatus: "Completed" | "Cancelled"
   ) => {
+    if (!instructorId || updatingId !== null) return;
+
+    const action =
+      newStatus === "Completed"
+        ? "mark this class as completed"
+        : "cancel this class";
+
+    const confirmed = window.confirm(
+      `Are you sure you want to ${action}?`
+    );
+
+    if (!confirmed) return;
+
+    setUpdatingId(scheduleId);
+
     try {
-      const res = await fetch(
-        `http://localhost:5000/api/teacher/class-schedule/status/${scheduleId}`,
+      const response = await apiFetch(
+        `/api/teacher/class-schedule/status/${scheduleId}`,
         {
           method: "PUT",
           headers: {
@@ -199,21 +343,29 @@ function InstructorOnlineClasses({
           },
           body: JSON.stringify({
             status: newStatus,
-            instructor_id: Number(instructorId),
+            instructor_id: instructorId,
           }),
         }
       );
 
-      const data = await res.json();
+      await parseResponse(response);
 
-      if (res.ok) {
-        fetchClassSchedules();
-      } else {
-        alert(data.message || "Failed to update class status.");
-      }
+      window.alert(
+        newStatus === "Completed"
+          ? "Class marked as completed successfully!"
+          : "Class cancelled successfully!"
+      );
+
+      // Reload from database after server confirms update.
+      await fetchClassSchedules();
     } catch (err) {
-      console.error("Error updating status:", err);
-      alert("Server error while updating class status.");
+      window.alert(
+        err instanceof Error
+          ? err.message
+          : "Unable to update class status."
+      );
+    } finally {
+      setUpdatingId(null);
     }
   };
 
@@ -224,11 +376,12 @@ function InstructorOnlineClasses({
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3 min-w-0">
             <button
+              type="button"
               onClick={() => {
                 if (onBack) onBack();
                 else navigate("/instructor-dashboard");
               }}
-              className="p-2 rounded-lg text-slate-600 hover:bg-slate-100 shrink-0 cursor-pointer"
+              className="p-2 rounded-lg text-slate-600 hover:bg-slate-100 shrink-0"
               title="Back to Dashboard"
             >
               <ArrowLeft size={20} />
@@ -238,36 +391,65 @@ function InstructorOnlineClasses({
               <h1 className="text-2xl font-bold text-slate-800">
                 Online Classes & Schedule
               </h1>
+
               <p className="text-sm text-slate-500 mt-1">
                 Manage and schedule live sessions for your courses
               </p>
             </div>
           </div>
 
-          <button
-            onClick={() => setShowModal(true)}
-            className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg font-medium transition cursor-pointer shrink-0"
-          >
-            <Plus size={18} />
-            Schedule New Class
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => void refreshAll()}
+              disabled={loading}
+              className="p-2.5 bg-white border rounded-lg hover:bg-slate-50 disabled:opacity-50"
+              title="Refresh Classes"
+            >
+              <RefreshCw size={19} />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowModal(true)}
+              className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-lg font-medium transition"
+            >
+              <Plus size={18} />
+              Schedule New Class
+            </button>
+          </div>
         </div>
       </div>
 
+      {/* ERRORS */}
+      {error && (
+        <div
+          role="alert"
+          className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-4 mb-5"
+        >
+          {error}
+        </div>
+      )}
+
       {/* CLASSES GRID */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-        {classes.length === 0 ? (
-          <div className="col-span-full bg-white rounded-xl p-10 text-center border shadow-sm">
-            <Video
-              size={48}
-              className="mx-auto text-slate-300 mb-3"
-            />
-            <p className="text-slate-600 font-medium">
-              No online classes scheduled yet.
-            </p>
-          </div>
-        ) : (
-          classes.map((cls) => (
+      {loading ? (
+        <div className="bg-white rounded-xl p-10 text-center text-slate-500">
+          Loading online classes...
+        </div>
+      ) : classes.length === 0 && !error ? (
+        <div className="bg-white rounded-xl p-10 text-center border shadow-sm">
+          <Video
+            size={48}
+            className="mx-auto text-slate-300 mb-3"
+          />
+
+          <p className="text-slate-600 font-medium">
+            No online classes scheduled yet.
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+          {classes.map((cls) => (
             <div
               key={cls.id}
               className="bg-white rounded-xl p-5 border shadow-sm flex flex-col justify-between min-w-0 w-full gap-4"
@@ -280,6 +462,7 @@ function InstructorOnlineClasses({
                       size={15}
                       className="shrink-0 mt-0.5"
                     />
+
                     <span className="break-words min-w-0">
                       {cls.course_title}
                     </span>
@@ -299,12 +482,15 @@ function InstructorOnlineClasses({
                     {cls.status === "Completed" && (
                       <CheckCircle size={13} />
                     )}
+
                     {cls.status === "Cancelled" && (
                       <XCircle size={13} />
                     )}
+
                     {cls.status === "Scheduled" && (
                       <Clock size={13} />
                     )}
+
                     {cls.status}
                   </span>
                 </div>
@@ -316,10 +502,14 @@ function InstructorOnlineClasses({
                       size={17}
                       className="text-slate-400 shrink-0 mt-0.5"
                     />
+
                     <div className="min-w-0">
-                      <span className="font-medium">Date: </span>
+                      <span className="font-medium">
+                        Date:{" "}
+                      </span>
+
                       <span className="font-semibold text-slate-700">
-                        {cls.session_date.split("T")[0]}
+                        {cls.session_date?.slice(0, 10) || "—"}
                       </span>
                     </div>
                   </div>
@@ -329,11 +519,16 @@ function InstructorOnlineClasses({
                       size={17}
                       className="text-slate-400 shrink-0 mt-0.5"
                     />
+
                     <div className="min-w-0">
-                      <span className="font-medium">Time: </span>
+                      <span className="font-medium">
+                        Time:{" "}
+                      </span>
+
                       <span className="text-slate-700 break-words">
                         {formatTime(cls.start_time)} -{" "}
-                        {formatTime(cls.end_time)} ({cls.time_zone})
+                        {formatTime(cls.end_time)} (
+                        {cls.time_zone || "PKT"})
                       </span>
                     </div>
                   </div>
@@ -343,8 +538,12 @@ function InstructorOnlineClasses({
                       size={17}
                       className="text-slate-400 shrink-0 mt-0.5"
                     />
+
                     <div>
-                      <span className="font-medium">Batch: </span>
+                      <span className="font-medium">
+                        Batch:{" "}
+                      </span>
+
                       <span className="font-semibold text-slate-700">
                         {cls.course_batch_id ?? "Not assigned"}
                       </span>
@@ -355,44 +554,60 @@ function InstructorOnlineClasses({
 
               {/* ACTION BUTTONS */}
               <div className="pt-4 border-t flex flex-col gap-3">
-                <a
-                  href={cls.meeting_link}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full bg-purple-50 hover:bg-purple-100 text-purple-700 text-center py-2.5 px-3 rounded-lg font-medium text-sm flex items-center justify-center gap-2 transition min-w-0"
-                >
-                  <LinkIcon size={16} className="shrink-0" />
-                  Join Meeting Room
-                </a>
+                {cls.meeting_link && (
+                  <a
+                    href={cls.meeting_link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full bg-purple-50 hover:bg-purple-100 text-purple-700 text-center py-2.5 px-3 rounded-lg font-medium text-sm flex items-center justify-center gap-2 transition"
+                  >
+                    <LinkIcon size={16} />
+                    Join Meeting Room
+                  </a>
+                )}
 
                 {cls.status === "Scheduled" && (
                   <div className="grid grid-cols-2 gap-2">
                     <button
+                      type="button"
+                      disabled={updatingId !== null}
                       onClick={() =>
-                        handleStatusUpdate(cls.id, "Completed")
+                        void handleStatusUpdate(
+                          cls.id,
+                          "Completed"
+                        )
                       }
-                      className="min-w-0 w-full bg-green-50 hover:bg-green-100 text-green-700 px-2 py-2.5 rounded-lg text-xs font-semibold transition cursor-pointer"
+                      className="min-w-0 w-full bg-green-50 hover:bg-green-100 text-green-700 px-2 py-2.5 rounded-lg text-xs font-semibold transition disabled:opacity-50"
                     >
-                      Mark Completed
+                      {updatingId === cls.id
+                        ? "Updating..."
+                        : "Mark Completed"}
                     </button>
 
                     <button
+                      type="button"
+                      disabled={updatingId !== null}
                       onClick={() =>
-                        handleStatusUpdate(cls.id, "Cancelled")
+                        void handleStatusUpdate(
+                          cls.id,
+                          "Cancelled"
+                        )
                       }
-                      className="min-w-0 w-full bg-red-50 hover:bg-red-100 text-red-700 px-2 py-2.5 rounded-lg text-xs font-semibold transition cursor-pointer"
+                      className="min-w-0 w-full bg-red-50 hover:bg-red-100 text-red-700 px-2 py-2.5 rounded-lg text-xs font-semibold transition disabled:opacity-50"
                     >
-                      Cancel Class
+                      {updatingId === cls.id
+                        ? "Updating..."
+                        : "Cancel Class"}
                     </button>
                   </div>
                 )}
               </div>
             </div>
-          ))
-        )}
-      </div>
+          ))}
+        </div>
+      )}
 
-      {/* SCHEDULE MODAL */}
+      {/* SCHEDULE NEW CLASS MODAL */}
       {showModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl max-w-lg w-full p-6 shadow-lg max-h-[90vh] overflow-y-auto">
@@ -402,12 +617,23 @@ function InstructorOnlineClasses({
               </h3>
 
               <button
+                type="button"
+                disabled={isSubmitting}
                 onClick={() => setShowModal(false)}
-                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+                className="text-slate-400 hover:text-slate-600"
               >
                 <X size={20} />
               </button>
             </div>
+
+            {courseError && (
+              <div
+                role="alert"
+                className="bg-red-50 text-red-700 border border-red-200 p-3 rounded-lg mb-4 text-sm"
+              >
+                {courseError}
+              </div>
+            )}
 
             <form
               onSubmit={handleCreateClass}
@@ -421,14 +647,18 @@ function InstructorOnlineClasses({
 
                 <select
                   value={batchId}
-                  onChange={(e) => {
-                    const selectedBatchId = e.target.value;
+                  onChange={(event) => {
+                    const selectedBatchId =
+                      event.target.value;
+
                     const selectedCourse = courses.find(
-                      (c) =>
-                        String(c.batch_id) === selectedBatchId
+                      (course) =>
+                        String(course.batch_id) ===
+                        selectedBatchId
                     );
 
                     setBatchId(selectedBatchId);
+
                     setCourseId(
                       selectedCourse
                         ? String(selectedCourse.course_id)
@@ -442,16 +672,25 @@ function InstructorOnlineClasses({
                     -- Choose Course & Batch --
                   </option>
 
-                  {courses.map((c) => (
+                  {courses.map((course) => (
                     <option
-                      key={c.batch_id}
-                      value={c.batch_id}
+                      key={course.batch_id}
+                      value={course.batch_id}
                     >
-                      {c.course_title} - Batch {c.batch_id}
-                      {" "}({c.timing_days}, {c.start_time} - {c.end_time})
+                      {course.course_title} - Batch{" "}
+                      {course.batch_id} (
+                      {course.timing_days},{" "}
+                      {course.start_time} -{" "}
+                      {course.end_time})
                     </option>
                   ))}
                 </select>
+
+                {!courseError && courses.length === 0 && (
+                  <p className="text-xs text-slate-500 mt-2">
+                    No assigned batches found.
+                  </p>
+                )}
               </div>
 
               {/* SESSION DATE */}
@@ -459,28 +698,30 @@ function InstructorOnlineClasses({
                 <label className="block text-sm font-medium text-slate-700 mb-1">
                   Session Date
                 </label>
+
                 <input
                   type="date"
                   value={sessionDate}
-                  onChange={(e) =>
-                    setSessionDate(e.target.value)
+                  onChange={(event) =>
+                    setSessionDate(event.target.value)
                   }
                   required
                   className="w-full border rounded-lg px-3 py-2 outline-none focus:border-blue-500"
                 />
               </div>
 
-              {/* START AND END TIME */}
+              {/* TIME */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">
                     Start Time
                   </label>
+
                   <input
                     type="time"
                     value={startTime}
-                    onChange={(e) =>
-                      setStartTime(e.target.value)
+                    onChange={(event) =>
+                      setStartTime(event.target.value)
                     }
                     required
                     className="w-full border rounded-lg px-3 py-2 outline-none focus:border-blue-500"
@@ -491,11 +732,12 @@ function InstructorOnlineClasses({
                   <label className="block text-sm font-medium text-slate-700 mb-1">
                     End Time
                   </label>
+
                   <input
                     type="time"
                     value={endTime}
-                    onChange={(e) =>
-                      setEndTime(e.target.value)
+                    onChange={(event) =>
+                      setEndTime(event.target.value)
                     }
                     required
                     className="w-full border rounded-lg px-3 py-2 outline-none focus:border-blue-500"
@@ -508,11 +750,12 @@ function InstructorOnlineClasses({
                 <label className="block text-sm font-medium text-slate-700 mb-1">
                   Time Zone
                 </label>
+
                 <input
                   type="text"
                   value={timeZone}
-                  onChange={(e) =>
-                    setTimeZone(e.target.value)
+                  onChange={(event) =>
+                    setTimeZone(event.target.value)
                   }
                   placeholder="e.g. PKT, EST"
                   className="w-full border rounded-lg px-3 py-2 outline-none focus:border-blue-500"
@@ -524,11 +767,12 @@ function InstructorOnlineClasses({
                 <label className="block text-sm font-medium text-slate-700 mb-1">
                   Meeting Link (Zoom / Teams / Meet)
                 </label>
+
                 <input
                   type="url"
                   value={meetingLink}
-                  onChange={(e) =>
-                    setMeetingLink(e.target.value)
+                  onChange={(event) =>
+                    setMeetingLink(event.target.value)
                   }
                   placeholder="https://meet.google.com/..."
                   required
@@ -540,16 +784,21 @@ function InstructorOnlineClasses({
               <div className="flex justify-end gap-3 pt-3 border-t">
                 <button
                   type="button"
+                  disabled={isSubmitting}
                   onClick={() => setShowModal(false)}
-                  className="px-4 py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-medium cursor-pointer"
+                  className="px-4 py-2 bg-slate-200 text-slate-700 rounded-lg text-sm font-medium"
                 >
                   Cancel
                 </button>
 
                 <button
                   type="submit"
-                  disabled={isSubmitting}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium cursor-pointer"
+                  disabled={
+                    isSubmitting ||
+                    !courses.length ||
+                    Boolean(courseError)
+                  }
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium"
                 >
                   {isSubmitting
                     ? "Scheduling..."

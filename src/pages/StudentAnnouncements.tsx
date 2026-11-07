@@ -1,6 +1,7 @@
 
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { apiFetch as fetch } from "../services/api";
 import {
   ArrowLeft,
   BookOpen,
@@ -38,7 +39,7 @@ type Exam = {
   batch_end_time: string | null;
 
   exam_status: "Draft" | "Published";
-  exam_mode: "Online" | "Offline";
+  exam_mode: "Online" | "Offline"; // Legacy Offline rows may still exist in DB.
   duration_minutes: number | null;
   attempt_limit: number;
   result_published: number;
@@ -313,8 +314,8 @@ export default function StudentExams() {
         setAttemptByExam(mapping);
         setExams(
           Array.isArray(examData.exams)
-            ? examData.exams
-            : []
+              ? examData.exams.filter((exam) => exam.exam_mode === "Online")
+              : []
         );
 
         setTotalPages(
@@ -358,10 +359,9 @@ export default function StudentExams() {
 
     if (exam.exam_mode !== "Online") {
       return {
-        label: "Offline",
+        label: "Unavailable",
         canStart: false,
-        message:
-          "This examination is conducted offline.",
+        message: "This legacy exam is not configured for online attempts.",
       };
     }
 
@@ -753,7 +753,7 @@ if (now < start) {
           </div>
         ) : exams.length === 0 ? (
           <div className="bg-white p-10 rounded-xl text-center text-slate-500">
-            No examinations found.
+            No online examinations found.
           </div>
         ) : (
           <div className="space-y-5">
@@ -833,10 +833,10 @@ if (now < start) {
 
                         <span className="inline-flex gap-2 items-center">
                           <BookOpen size={16} />
-                          {exam.exam_mode}
+                          Online
                         </span>
 
-                        {exam.exam_mode === "Online" && (
+                        {(
                           <>
                             <span className="inline-flex gap-2 items-center">
                               <Timer size={16} />

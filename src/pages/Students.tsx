@@ -11,6 +11,7 @@ import {
   Save,
   User
 } from "lucide-react";
+import { apiFetch as fetch } from "../services/api";
 
 type Student = {
   id: string;

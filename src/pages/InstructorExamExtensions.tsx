@@ -1,6 +1,7 @@
 
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { apiFetch as fetch } from "../services/api";
 import {
   ArrowLeft,
   CalendarClock,
