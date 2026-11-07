@@ -3,8 +3,7 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { MailCheck } from "lucide-react";
-
-const API = "http://localhost:5000";
+import { apiFetch } from "../services/api";
 
 function VerifyEmail() {
   const [params] = useSearchParams();
@@ -16,6 +15,7 @@ function VerifyEmail() {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [resending, setResending] = useState(false);
   const [verified, setVerified] = useState(false);
 
   const verify = async (e: FormEvent) => {
@@ -25,17 +25,16 @@ function VerifyEmail() {
     setLoading(true);
 
     try {
-      const response = await fetch(
-        `${API}/api/auth/verify-email`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            email: email.trim(),
-            code
-          })
-        }
-      );
+      const response = await apiFetch("/api/auth/verify-email", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim().toLowerCase(),
+          code: code.trim(),
+        }),
+      });
 
       const data = await response.json();
 
@@ -44,7 +43,7 @@ function VerifyEmail() {
       }
 
       setVerified(true);
-      setMessage(data.message);
+      setMessage(data.message || "Email verified successfully.");
     } catch (err) {
       setError(
         err instanceof Error
@@ -57,18 +56,22 @@ function VerifyEmail() {
   };
 
   const resend = async () => {
+    if (resending || loading) return;
+
     setError("");
     setMessage("");
+    setResending(true);
 
     try {
-      const response = await fetch(
-        `${API}/api/auth/resend-otp`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: email.trim() })
-        }
-      );
+      const response = await apiFetch("/api/auth/resend-otp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: email.trim().toLowerCase(),
+        }),
+      });
 
       const data = await response.json();
 
@@ -76,13 +79,17 @@ function VerifyEmail() {
         throw new Error(data.message || "Resend failed.");
       }
 
-      setMessage(data.message);
+      setMessage(
+        data.message || "A new verification code has been sent."
+      );
     } catch (err) {
       setError(
         err instanceof Error
           ? err.message
           : "Unable to resend code."
       );
+    } finally {
+      setResending(false);
     }
   };
 
@@ -111,13 +118,19 @@ function VerifyEmail() {
           </p>
 
           {error && (
-            <p className="bg-red-50 text-red-700 p-3 rounded-lg text-sm mt-5">
+            <p
+              role="alert"
+              className="bg-red-50 text-red-700 p-3 rounded-lg text-sm mt-5"
+            >
               {error}
             </p>
           )}
 
           {message && (
-            <p className="bg-green-50 text-green-700 p-3 rounded-lg text-sm mt-5">
+            <p
+              role="status"
+              className="bg-green-50 text-green-700 p-3 rounded-lg text-sm mt-5"
+            >
               {message}
             </p>
           )}
@@ -125,29 +138,42 @@ function VerifyEmail() {
           {!verified ? (
             <form onSubmit={verify} className="mt-6 space-y-4">
               <div>
-                <label className="block text-sm font-medium mb-1">
+                <label
+                  htmlFor="verify-email"
+                  className="block text-sm font-medium mb-1"
+                >
                   Email Address
                 </label>
                 <input
+                  id="verify-email"
+                  name="email"
                   type="email"
+                  autoComplete="email"
                   required
                   value={email}
-                  onChange={e => setEmail(e.target.value)}
+                  onChange={(e) => setEmail(e.target.value)}
                   className="w-full border p-3 rounded-lg"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium mb-1">
+                <label
+                  htmlFor="verification-code"
+                  className="block text-sm font-medium mb-1"
+                >
                   Verification Code
                 </label>
                 <input
+                  id="verification-code"
+                  name="code"
+                  type="text"
                   required
                   inputMode="numeric"
+                  autoComplete="one-time-code"
                   pattern="[0-9]{6}"
                   maxLength={6}
                   value={code}
-                  onChange={e =>
+                  onChange={(e) =>
                     setCode(e.target.value.replace(/\D/g, ""))
                   }
                   placeholder="6-digit OTP"
@@ -156,7 +182,7 @@ function VerifyEmail() {
               </div>
 
               <button
-                disabled={loading}
+                disabled={loading || resending}
                 type="submit"
                 className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold disabled:opacity-50"
               >
@@ -165,10 +191,13 @@ function VerifyEmail() {
 
               <button
                 type="button"
+                disabled={loading || resending}
                 onClick={() => void resend()}
-                className="w-full text-blue-600 font-medium text-sm"
+                className="w-full text-blue-600 font-medium text-sm disabled:opacity-50"
               >
-                Resend Verification Code
+                {resending
+                  ? "Sending code..."
+                  : "Resend Verification Code"}
               </button>
             </form>
           ) : (
