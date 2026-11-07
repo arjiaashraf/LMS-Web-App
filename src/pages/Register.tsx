@@ -2,8 +2,7 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate, Link } from "react-router-dom";
-
-const API = "http://localhost:5000";
+import { apiFetch } from "../services/api";
 
 function Register() {
   const navigate = useNavigate();
@@ -27,25 +26,31 @@ function Register() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API}/api/register`, {
+      const normalizedEmail = email.trim().toLowerCase();
+
+      const response = await apiFetch("/api/register", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           name: name.trim(),
-          email: email.trim().toLowerCase(),
+          email: normalizedEmail,
           password,
-          role
-        })
+          role,
+        }),
       });
 
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.message || "Registration failed.");
+        throw new Error(
+          data.message || "Registration failed."
+        );
       }
 
       navigate(
-        `/verify-email?email=${encodeURIComponent(email.trim().toLowerCase())}`,
+        `/verify-email?email=${encodeURIComponent(normalizedEmail)}`,
         { replace: true }
       );
     } catch (error) {
@@ -62,6 +67,8 @@ function Register() {
   return (
     <div className="min-h-screen bg-slate-100 flex items-center justify-center px-4 py-10">
       <div className="w-full max-w-md">
+
+        {/* Campus 95 Logo */}
         <div className="flex justify-center mb-6">
           <img
             src="/campus95-logo.png"
@@ -79,21 +86,36 @@ function Register() {
             Join Campus 95 Learning Management System
           </p>
 
+          {/* Error Message */}
           {error && (
-            <p className="mt-5 p-3 text-sm bg-red-50 text-red-700 rounded-lg">
+            <p
+              role="alert"
+              className="mt-5 p-3 text-sm bg-red-50 text-red-700 rounded-lg"
+            >
               {error}
             </p>
           )}
 
-          <form onSubmit={handleRegister} className="mt-6 space-y-4">
+          {/* Registration Form */}
+          <form
+            onSubmit={handleRegister}
+            className="mt-6 space-y-4"
+          >
             <div>
-              <label className="block text-sm font-medium mb-1">
+              <label
+                htmlFor="register-name"
+                className="block text-sm font-medium mb-1"
+              >
                 Full Name
               </label>
               <input
+                id="register-name"
+                name="name"
+                type="text"
+                autoComplete="name"
                 required
                 value={name}
-                onChange={e => setName(e.target.value)}
+                onChange={(e) => setName(e.target.value)}
                 minLength={2}
                 maxLength={100}
                 className="w-full rounded-lg border p-3"
@@ -102,42 +124,59 @@ function Register() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium mb-1">
+              <label
+                htmlFor="register-email"
+                className="block text-sm font-medium mb-1"
+              >
                 Email Address
               </label>
               <input
+                id="register-email"
+                name="email"
                 type="email"
+                autoComplete="email"
                 required
                 value={email}
-                onChange={e => setEmail(e.target.value)}
+                onChange={(e) => setEmail(e.target.value)}
                 className="w-full rounded-lg border p-3"
                 placeholder="Enter your real email"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium mb-1">
+              <label
+                htmlFor="register-password"
+                className="block text-sm font-medium mb-1"
+              >
                 Password
               </label>
               <input
+                id="register-password"
+                name="password"
                 type="password"
+                autoComplete="new-password"
                 required
                 minLength={8}
                 maxLength={72}
                 value={password}
-                onChange={e => setPassword(e.target.value)}
+                onChange={(e) => setPassword(e.target.value)}
                 className="w-full rounded-lg border p-3"
                 placeholder="At least 8 characters"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium mb-1">
+              <label
+                htmlFor="register-role"
+                className="block text-sm font-medium mb-1"
+              >
                 Register As
               </label>
               <select
+                id="register-role"
+                name="role"
                 value={role}
-                onChange={e => setRole(e.target.value)}
+                onChange={(e) => setRole(e.target.value)}
                 className="w-full rounded-lg border p-3 bg-white"
               >
                 <option value="student">Student</option>
@@ -150,13 +189,18 @@ function Register() {
               type="submit"
               className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-semibold py-3 rounded-lg"
             >
-              {loading ? "Creating account..." : "Create Account"}
+              {loading
+                ? "Creating account..."
+                : "Create Account"}
             </button>
           </form>
 
           <p className="text-center text-sm text-slate-500 mt-5">
             Already registered?{" "}
-            <Link to="/login" className="text-blue-600 font-semibold">
+            <Link
+              to="/login"
+              className="text-blue-600 font-semibold"
+            >
               Sign In
             </Link>
           </p>
