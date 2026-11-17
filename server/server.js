@@ -8419,22 +8419,15 @@ app.post(
     const examId = Number(req.params.examId);
     const studentId = Number(req.body?.student_id);
 
-    if (
-      !validExamExtensionId(examId) ||
-      !validExamExtensionId(studentId)
-    ) {
+    if (!Number.isInteger(examId) || examId <= 0 || !Number.isInteger(studentId) || studentId <= 0) {
       return res.status(400).json({
         message: "Invalid exam or student ID."
       });
     }
 
-    let transactionStarted = false;
-
     try {
-      await examExtensionBegin();
-      transactionStarted = true;
-
-      const exams = await examExtensionQuery(
+      // 1. Get Exam & Enrollment details
+      db.query(
         `SELECT
            e.id,
            e.title,
@@ -8443,265 +8436,172 @@ app.post(
            e.exam_status,
            e.result_published,
            e.attempt_limit,
-
-           COALESCE(
-             x.extra_attempts, 0
-           ) AS extra_attempts,
-
-           COALESCE(
-             x.duration_minutes,
-             e.duration_minutes
-           ) AS allowed_duration,
-
+           COALESCE(x.extra_attempts, 0) AS extra_attempts,
+           COALESCE(x.duration_minutes, e.duration_minutes) AS allowed_duration,
            DATE_FORMAT(
              COALESCE(
                x.end_at,
-               DATE_ADD(
-                 TIMESTAMP(e.exam_date, e.start_time),
-                 INTERVAL e.duration_minutes MINUTE
-               )
+               DATE_ADD(TIMESTAMP(e.exam_date, e.start_time), INTERVAL e.duration_minutes MINUTE)
              ),
              '%Y-%m-%d %H:%i:%s'
            ) AS closes_at,
-
            CASE
-             WHEN NOW() >= COALESCE(
-               x.start_at,
-               TIMESTAMP(e.exam_date, e.start_time)
-             )
-             AND NOW() < COALESCE(
-               x.end_at,
-               DATE_ADD(
-                 TIMESTAMP(e.exam_date, e.start_time),
-                 INTERVAL e.duration_minutes MINUTE
-               )
-             )
+             WHEN NOW() >= COALESCE(x.start_at, TIMESTAMP(e.exam_date, e.start_time))
+              AND NOW() < COALESCE(
+                    x.end_at,
+                    DATE_ADD(TIMESTAMP(e.exam_date, e.start_time), INTERVAL e.duration_minutes MINUTE)
+                  )
              THEN 1
              ELSE 0
            END AS window_open
-
          FROM exams e
-
          JOIN course_enrollments ce
            ON ce.course_batch_id = e.course_batch_id
           AND ce.student_id = ?
           AND ce.status = 'Active'
-
          LEFT JOIN student_exam_extensions x
            ON x.exam_id = e.id
           AND x.student_id = ?
-
          WHERE e.id = ?`,
-        [studentId, studentId, examId]
-      );
+        [studentId, studentId, examId],
+        (err, exams) => {
+          if (err) {
+            return res.status(500).json({ message: "Database error.", error: err.sqlMessage || err.message });
+          }
 
-      if (!exams.length) {
-        await examExtensionRollback();
+          if (!exams.length) {
+            return res.status(403).json({ message: "Exam not found or student not enrolled." });
+          }
 
-        return res.status(403).json({
-          message: "Exam not found or student not enrolled."
-        });
-      }
+          const exam = exams[0];
 
-      const exam = exams[0];
+          if (exam.exam_mode !== "Online" || exam.exam_status !== "Published") {
+            return res.status(409).json({ message: "Exam is not available for online attempts." });
+          }
 
-      if (
-        exam.exam_mode !== "Online" ||
-        exam.exam_status !== "Published"
-      ) {
-        await examExtensionRollback();
+          if (Number(exam.result_published) === 1) {
+            return res.status(409).json({ message: "Exam results have already been published." });
+          }
 
-        return res.status(409).json({
-          message: "Exam is not available for online attempts."
-        });
-      }
+          // 2. Check Exam Questions
+          db.query(
+            `SELECT COUNT(*) AS question_count, COALESCE(SUM(marks), 0) AS total_question_marks
+             FROM exam_questions WHERE exam_id = ?`,
+            [examId],
+            (qErr, totals) => {
+              if (qErr) {
+                return res.status(500).json({ message: "Database error.", error: qErr.sqlMessage || qErr.message });
+              }
 
-      if (Number(exam.result_published) === 1) {
-        await examExtensionRollback();
+              if (
+                Number(totals[0].question_count) === 0 ||
+                Math.abs(Number(totals[0].total_question_marks) - Number(exam.total_marks)) > 0.001
+              ) {
+                return res.status(409).json({ message: "Exam questions are incomplete." });
+              }
 
-        return res.status(409).json({
-          message: "Exam results have already been published."
-        });
-      }
+              // 3. Check Previous Attempts
+              db.query(
+                `SELECT id, attempt_number, status, UNIX_TIMESTAMP(expires_at) AS expires_unix, UNIX_TIMESTAMP() AS server_now_unix
+                 FROM exam_attempts
+                 WHERE exam_id = ? AND student_id = ?
+                 ORDER BY attempt_number DESC, id DESC LIMIT 1`,
+                [examId, studentId],
+                (attErr, attempts) => {
+                  if (attErr) {
+                    return res.status(500).json({ message: "Database error.", error: attErr.sqlMessage || attErr.message });
+                  }
 
-      const totals = await examExtensionQuery(
-        `SELECT
-           COUNT(*) AS question_count,
-           COALESCE(SUM(marks), 0) AS total_question_marks
-         FROM exam_questions
-         WHERE exam_id = ?`,
-        [examId]
-      );
+                  const previous = attempts[0];
 
-      if (
-        Number(totals[0].question_count) === 0 ||
-        Math.abs(
-          Number(totals[0].total_question_marks) -
-          Number(exam.total_marks)
-        ) > 0.001
-      ) {
-        await examExtensionRollback();
+                  if (previous?.status === "InProgress") {
+                    const expiry = Number(previous.expires_unix);
+                    const now = Number(previous.server_now_unix);
 
-        return res.status(409).json({
-          message: "Exam questions are incomplete."
-        });
-      }
+                    if (expiry <= now) {
+                      return res.status(409).json({
+                        message: "Previous attempt has expired. Finalize it before starting a new attempt.",
+                        attempt_id: previous.id
+                      });
+                    }
 
-      const attempts = await examExtensionQuery(
-        `SELECT
-           id,
-           attempt_number,
-           status,
-           UNIX_TIMESTAMP(expires_at) AS expires_unix,
-           UNIX_TIMESTAMP() AS server_now_unix
+                    return res.json({
+                      message: "Existing attempt resumed.",
+                      attempt_id: previous.id,
+                      exam_id: examId,
+                      attempt_number: previous.attempt_number,
+                      expires_at_unix: expiry,
+                      server_now_unix: now,
+                      resumed: true
+                    });
+                  }
 
-         FROM exam_attempts
+                  if (Number(exam.window_open) !== 1) {
+                    return res.status(409).json({ message: "Exam is outside your allowed time window." });
+                  }
 
-         WHERE exam_id = ?
-           AND student_id = ?
+                  const nextAttempt = previous ? Number(previous.attempt_number) + 1 : 1;
+                  const allowedAttempts = Number(exam.attempt_limit || 1) + Number(exam.extra_attempts || 0);
 
-         ORDER BY attempt_number DESC, id DESC
-         LIMIT 1`,
-        [examId, studentId]
-      );
+                  if (nextAttempt > allowedAttempts) {
+                    return res.status(409).json({ message: "Maximum exam attempts reached." });
+                  }
 
-      const previous = attempts[0];
+                  const duration = Number(exam.allowed_duration);
+                  if (!Number.isSafeInteger(duration) || duration < 1 || duration > 480) {
+                    return res.status(409).json({ message: "Exam duration is invalid." });
+                  }
 
-      if (previous?.status === "InProgress") {
-        const expiry = Number(previous.expires_unix);
-        const now = Number(previous.server_now_unix);
+                  // 4. Create New Attempt
+                  db.query(
+                    `INSERT INTO exam_attempts (exam_id, student_id, attempt_number, started_at, status, expires_at)
+                     VALUES (?, ?, ?, NOW(), 'InProgress', LEAST(DATE_ADD(NOW(), INTERVAL ? MINUTE), ?))`,
+                    [examId, studentId, nextAttempt, duration, exam.closes_at],
+                    (insErr, inserted) => {
+                      if (insErr) {
+                        if (insErr.code === "ER_DUP_ENTRY") {
+                          return res.status(409).json({ message: "Attempt already exists. Refresh and retry." });
+                        }
+                        return res.status(500).json({ message: "Failed to start examination.", error: insErr.sqlMessage || insErr.message });
+                      }
 
-        if (expiry <= now) {
-          await examExtensionRollback();
+                      db.query(
+                        `SELECT id, attempt_number, UNIX_TIMESTAMP(expires_at) AS expires_unix, UNIX_TIMESTAMP() AS server_now_unix
+                         FROM exam_attempts WHERE id = ?`,
+                        [inserted.insertId],
+                        (selErr, created) => {
+                          if (selErr || !created.length) {
+                            return res.status(500).json({ message: "Failed to retrieve started attempt." });
+                          }
 
-          return res.status(409).json({
-            message:
-              "Previous attempt has expired. Finalize it before starting a new attempt.",
-            attempt_id: previous.id
-          });
+                          return res.status(201).json({
+                            message: "Exam started successfully.",
+                            attempt_id: created[0].id,
+                            exam_id: examId,
+                            attempt_number: created[0].attempt_number,
+                            expires_at_unix: Number(created[0].expires_unix),
+                            server_now_unix: Number(created[0].server_now_unix),
+                            resumed: false
+                          });
+                        }
+                      );
+                    }
+                  );
+                }
+              );
+            }
+          );
         }
-
-        await examExtensionCommit();
-        transactionStarted = false;
-
-        return res.json({
-          message: "Existing attempt resumed.",
-          attempt_id: previous.id,
-          exam_id: examId,
-          attempt_number: previous.attempt_number,
-          expires_at_unix: expiry,
-          server_now_unix: now,
-          resumed: true
-        });
-      }
-
-      if (Number(exam.window_open) !== 1) {
-        await examExtensionRollback();
-
-        return res.status(409).json({
-          message: "Exam is outside your allowed time window."
-        });
-      }
-
-      const nextAttempt = previous
-        ? Number(previous.attempt_number) + 1
-        : 1;
-
-      const allowedAttempts =
-        Number(exam.attempt_limit || 1) +
-        Number(exam.extra_attempts || 0);
-
-      if (nextAttempt > allowedAttempts) {
-        await examExtensionRollback();
-
-        return res.status(409).json({
-          message: "Maximum exam attempts reached."
-        });
-      }
-
-      const duration = Number(exam.allowed_duration);
-
-      if (
-        !Number.isSafeInteger(duration) ||
-        duration < 1 ||
-        duration > 480
-      ) {
-        await examExtensionRollback();
-
-        return res.status(409).json({
-          message: "Exam duration is invalid."
-        });
-      }
-
-      const inserted = await examExtensionQuery(
-        `INSERT INTO exam_attempts (
-           exam_id,
-           student_id,
-           attempt_number,
-           started_at,
-           status,
-           expires_at
-         )
-         VALUES (
-           ?, ?, ?, NOW(), 'InProgress',
-           LEAST(
-             DATE_ADD(NOW(), INTERVAL ? MINUTE),
-             ?
-           )
-         )`,
-        [
-          examId,
-          studentId,
-          nextAttempt,
-          duration,
-          exam.closes_at
-        ]
       );
-
-      const created = await examExtensionQuery(
-        `SELECT
-           id,
-           attempt_number,
-           UNIX_TIMESTAMP(expires_at) AS expires_unix,
-           UNIX_TIMESTAMP() AS server_now_unix
-         FROM exam_attempts
-         WHERE id = ?`,
-        [inserted.insertId]
-      );
-
-      await examExtensionCommit();
-      transactionStarted = false;
-
-      return res.status(201).json({
-        message: "Exam started successfully.",
-        attempt_id: created[0].id,
-        exam_id: examId,
-        attempt_number: created[0].attempt_number,
-        expires_at_unix: Number(created[0].expires_unix),
-        server_now_unix: Number(created[0].server_now_unix),
-        resumed: false
-      });
     } catch (err) {
-      if (transactionStarted) {
-        await examExtensionRollback();
-      }
-
-      console.error("Start exam with extension error:", err);
-
-      if (err.code === "ER_DUP_ENTRY") {
-        return res.status(409).json({
-          message: "Attempt already exists. Refresh and retry."
-        });
-      }
-
+      console.error("Start exam error:", err);
       return res.status(500).json({
         message: "Failed to start examination.",
-        error: err.sqlMessage || err.message
+        error: err.message
       });
     }
   }
 );
-
 
 /* ========================================================
    SMART LMS — AUTOMATIC EXAM EXPIRY & RESULT SYNC
