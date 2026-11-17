@@ -2589,6 +2589,7 @@ app.get('/api/students', (req, res) => {
 });
 
 // STUDENT - Get All Published Courses Catalog
+// STUDENT - Get All Published Courses Catalog
 app.get('/api/student/courses', (req, res) => {
   const query = `
     SELECT c.*,
@@ -2597,7 +2598,7 @@ app.get('/api/student/courses', (req, res) => {
     LEFT JOIN course_batches cb ON cb.course_id = c.id
     LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
     LEFT JOIN users inst ON inst.id = bi.instructor_id OR inst.id = cb.instructor_id
-    WHERE c.status = 'Published'
+    WHERE LOWER(TRIM(c.status)) = 'published'
     GROUP BY c.id
     ORDER BY c.id DESC
   `;
@@ -3459,21 +3460,24 @@ app.get('/api/instructor/batches/:instructorId', (req, res) => {
       MAX(c.schedule) AS schedule,
       MAX(c.category) AS category,
       MAX(c.thumbnail) AS thumbnail,
-      GROUP_CONCAT(DISTINCT cb.timing_days SEPARATOR ' | ') AS timing_days,
-      GROUP_CONCAT(DISTINCT CONCAT(cb.start_time, ' - ', cb.end_time) SEPARATOR ' | ') AS start_time,
-      GROUP_CONCAT(DISTINCT u_all.name SEPARATOR ', ') AS assigned_instructors,
+      MAX(c.status) AS status,
+      COALESCE(GROUP_CONCAT(DISTINCT cb.timing_days SEPARATOR ' | '), 'Awaiting Batch Assignment') AS timing_days,
+      COALESCE(GROUP_CONCAT(DISTINCT CONCAT(cb.start_time, ' - ', cb.end_time) SEPARATOR ' | '), 'Not Scheduled Yet') AS start_time,
+      COALESCE(GROUP_CONCAT(DISTINCT u_all.name SEPARATOR ', '), MAX(prop.name)) AS assigned_instructors,
       COALESCE(SUM(
         (SELECT COUNT(*) FROM course_enrollments ce WHERE ce.course_batch_id = cb.id AND ce.status = 'Active')
       ), 0) AS active_students_count,
       MAX(cb.id) AS id
     FROM courses c
-    JOIN course_batches cb ON cb.course_id = c.id
+    LEFT JOIN users prop ON prop.id = c.proposed_by
+    LEFT JOIN course_batches cb ON cb.course_id = c.id
     LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
     LEFT JOIN users u_all ON u_all.id = bi.instructor_id OR u_all.id = cb.instructor_id
-    WHERE cb.instructor_id = ? OR bi.instructor_id = ?
-    GROUP BY c.id;
+    WHERE cb.instructor_id = ? OR bi.instructor_id = ? OR c.proposed_by = ?
+    GROUP BY c.id
+    ORDER BY c.id DESC;
   `;
-  db.query(query, [instructorId, instructorId], (err, results) => {
+  db.query(query, [instructorId, instructorId, instructorId], (err, results) => {
     if (err) return res.status(500).json({ message: "Database error", error: err });
     res.json(results);
   });
