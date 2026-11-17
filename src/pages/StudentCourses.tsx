@@ -29,6 +29,8 @@ type Batch = {
   id: number;
   instructor_id: number;
   instructor_name: string;
+  qualification?: string | null;
+  specialisation?: string | null;
   timing_days: string;
   start_time: string;
   end_time: string;
@@ -429,6 +431,15 @@ function StudentCourses() {
                         <span className="font-bold text-slate-800">
                           Instructor: {b.instructor_name}
                         </span>
+                        <p className="text-xs text-slate-500 ml-5 mt-0.5">
+                          Qualification:{" "}
+                          <span className="font-medium text-slate-700">
+                            {b.qualification?.trim() || "Not Provided"}
+                          </span>
+                          {b.specialisation?.trim()
+                            ? ` • Specialisation: ${b.specialisation}`
+                            : ""}
+                        </p>
                       </div>
                       <span className="text-xs bg-purple-100 text-purple-700 px-2 py-1 rounded">
                         Seats Left: {Math.max(0, b.capacity - b.current_enrolled)}

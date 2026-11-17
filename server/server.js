@@ -3112,12 +3112,63 @@ app.get('/api/admin/pending-courses', (req, res) => {
 });
 
 app.put('/api/admin/course-status/:id', (req, res) => {
-  const courseId = req.params.id;
+  const courseId = Number(req.params.id);
   const { status, fee } = req.body;
   const query = `UPDATE courses SET status = ?, fee = ? WHERE id = ?`;
-  db.query(query, [status, fee || 0, courseId], (err, result) => {
+
+  db.query(query, [status, fee || 0, courseId], (err) => {
     if (err) return res.status(500).json({ message: "Database error", error: err });
-    res.json({ message: `Course approved, published, and fee set to $${fee || 0} successfully!` });
+
+    if (status !== 'Published') {
+      return res.json({ message: `Course status updated to ${status}.` });
+    }
+
+    // Automatically assign the proposing instructor to a default batch if none exists yet.
+    db.query(
+      `SELECT proposed_by, schedule FROM courses WHERE id = ? LIMIT 1`,
+      [courseId],
+      (courseErr, courses) => {
+        const proposerId = !courseErr && courses.length ? Number(courses[0].proposed_by) : 0;
+
+        if (!proposerId) {
+          return res.json({
+            message: `Course approved, published, and fee set to $${fee || 0} successfully!`,
+          });
+        }
+
+        db.query(
+          `SELECT id FROM course_batches WHERE course_id = ? LIMIT 1`,
+          [courseId],
+          (batchCheckErr, existingBatches) => {
+            if (batchCheckErr || existingBatches.length > 0) {
+              return res.json({
+                message: `Course approved, published, and fee set to $${fee || 0} successfully!`,
+              });
+            }
+
+            const timingDays = courses[0].schedule?.trim() || "Mon, Wed, Fri";
+
+            db.query(
+              `INSERT INTO course_batches (course_id, instructor_id, timing_days, start_time, end_time, capacity, start_date)
+               VALUES (?, ?, ?, '10:00 AM', '11:30 AM', 30, CURDATE())`,
+              [courseId, proposerId, timingDays],
+              (insertErr, batchResult) => {
+                if (!insertErr && batchResult?.insertId) {
+                  db.query(
+                    `INSERT IGNORE INTO batch_instructors (batch_id, instructor_id) VALUES (?, ?)`,
+                    [batchResult.insertId, proposerId]
+                  );
+                }
+
+                return res.json({
+                  message: `Course approved, published, assigned to proposer instructor, and fee set to $${fee || 0} successfully!`,
+                });
+              }
+            );
+          }
+        );
+      }
+    );
   });
 });
 
