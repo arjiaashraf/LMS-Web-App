@@ -7858,155 +7858,127 @@ app.put('/api/teacher/exams/:examId/reschedule', (req, res) => {
     });
   }
 
-  db.beginTransaction((beginErr) => {
-    if (beginErr) {
-      return res.status(500).json({
-        message: 'Unable to begin reschedule.'
-      });
-    }
+  // Verify exam and instructor authorization using proper table joins
+  const verifySql = `
+    SELECT
+      e.id,
+      e.exam_mode,
+      e.exam_status,
+      e.result_published,
 
-    const fail = (code, message) => {
-      db.rollback(() => {
-        res.status(code).json({ message });
-      });
-    };
+      (
+        SELECT COUNT(*)
+        FROM exam_attempts
+        WHERE exam_id = e.id
+      ) AS attempt_count,
 
-    const verifySql = `
-      SELECT
-        id,
-        exam_mode,
-        exam_status,
-        result_published,
+      (
+        SELECT COUNT(*)
+        FROM exam_results
+        WHERE exam_id = e.id
+      ) AS result_count,
 
-        (
-          SELECT COUNT(*)
-          FROM exam_attempts
-          WHERE exam_id = ?
-        ) AS attempt_count,
+      CASE
+        WHEN TIMESTAMP(?, ?) > NOW()
+        THEN 1
+        ELSE 0
+      END AS future_schedule
 
-        (
-          SELECT COUNT(*)
-          FROM exam_results
-          WHERE exam_id = ?
-        ) AS result_count,
+    FROM exams e
+    JOIN course_batches cb ON cb.id = e.course_batch_id
+    JOIN courses c ON c.id = cb.course_id
+    WHERE e.id = ?
+      AND (cb.instructor_id = ? OR c.proposed_by = ?)
+  `;
 
-        CASE
-          WHEN TIMESTAMP(?, ?) > NOW()
-          THEN 1
-          ELSE 0
-        END AS future_schedule
+  db.query(
+    verifySql,
+    [examDate, startTime, examId, teacherId, teacherId],
+    (err, rows) => {
+      if (err) {
+        console.error('Reschedule verification error:', err);
+        return res.status(500).json({
+          message: 'Failed to verify exam schedule.',
+          error: err.sqlMessage || err.message
+        });
+      }
 
-      FROM exams
-      WHERE id = ?
-        AND teacher_id = ?
-      FOR UPDATE
-    `;
+      if (!rows.length) {
+        return res.status(403).json({
+          message: 'Exam not found or access denied.'
+        });
+      }
 
-    db.query(
-      verifySql,
-      [examId, examId, examDate, startTime, examId, teacherId],
-      (err, rows) => {
-        if (err) {
-          console.error('Reschedule verification error:', err);
+      const exam = rows[0];
 
-          return fail(500, 'Failed to verify exam schedule.');
-        }
+      if (exam.exam_mode !== 'Online') {
+        return res.status(409).json({
+          message: 'Only Online exams can be rescheduled here.'
+        });
+      }
 
-        if (!rows.length) {
-          return fail(
-            403,
-            'Exam not found or access denied.'
-          );
-        }
+      if (Number(exam.result_published) === 1) {
+        return res.status(409).json({
+          message: 'Published results prevent rescheduling.'
+        });
+      }
 
-        const exam = rows[0];
+      if (
+        Number(exam.attempt_count) > 0 ||
+        Number(exam.result_count) > 0
+      ) {
+        return res.status(409).json({
+          message: 'Exam has student attempts or results. Use per-student extension/retake instead.'
+        });
+      }
 
-        if (exam.exam_mode !== 'Online') {
-          return fail(
-            409,
-            'Only Online exams can be rescheduled here.'
-          );
-        }
+      if (Number(exam.future_schedule) !== 1) {
+        return res.status(400).json({
+          message: 'New exam date and time must be in the future (server timezone).'
+        });
+      }
 
-        if (Number(exam.result_published) === 1) {
-          return fail(
-            409,
-            'Published results prevent rescheduling.'
-          );
-        }
+      const updateSql = `
+        UPDATE exams
+        SET exam_date = ?,
+            start_time = ?,
+            duration_minutes = ?
+        WHERE id = ?
+      `;
 
-        if (
-          Number(exam.attempt_count) > 0 ||
-          Number(exam.result_count) > 0
-        ) {
-          return fail(
-            409,
-            'Exam has student attempts or results. Use per-student extension/retake instead.'
-          );
-        }
+      db.query(
+        updateSql,
+        [
+          examDate,
+          `${startTime}:00`,
+          duration,
+          examId
+        ],
+        (updateErr, result) => {
+          if (
+            updateErr ||
+            result.affectedRows !== 1
+          ) {
+            console.error('Reschedule update error:', updateErr);
 
-        if (Number(exam.future_schedule) !== 1) {
-          return fail(
-            400,
-            'New exam date and time must be in the future (server timezone).'
-          );
-        }
-
-        const updateSql = `
-          UPDATE exams
-          SET exam_date = ?,
-              start_time = ?,
-              duration_minutes = ?
-          WHERE id = ?
-            AND teacher_id = ?
-        `;
-
-        db.query(
-          updateSql,
-          [
-            examDate,
-            `${startTime}:00`,
-            duration,
-            examId,
-            teacherId
-          ],
-          (updateErr, result) => {
-            if (
-              updateErr ||
-              result.affectedRows !== 1
-            ) {
-              console.error('Reschedule update error:', updateErr);
-
-              return fail(
-                500,
-                'Failed to reschedule exam.'
-              );
-            }
-
-            db.commit((commitErr) => {
-              if (commitErr) {
-                return db.rollback(() => {
-                  res.status(500).json({
-                    message: 'Reschedule commit failed.'
-                  });
-                });
-              }
-
-              return res.json({
-                message: 'Exam rescheduled successfully.',
-                exam_id: examId,
-                exam_date: examDate,
-                start_time: startTime,
-                duration_minutes: duration
-              });
+            return res.status(500).json({
+              message: 'Failed to reschedule exam.',
+              error: updateErr?.sqlMessage || updateErr?.message
             });
           }
-        );
-      }
-    );
-  });
-});
 
+          return res.json({
+            message: 'Exam rescheduled successfully.',
+            exam_id: examId,
+            exam_date: examDate,
+            start_time: startTime,
+            duration_minutes: duration
+          });
+        }
+      );
+    }
+  );
+});
 
 /* =====================================================
    SMART LMS — INDIVIDUAL EXAM EXTENSIONS AND RETAKES
@@ -8426,7 +8398,7 @@ app.post(
     }
 
     try {
-      // 1. Get Exam & Enrollment details
+      // 1. Get Exam & Enrollment details (without strict NOW() timezone mismatch)
       db.query(
         `SELECT
            e.id,
@@ -8444,16 +8416,7 @@ app.post(
                DATE_ADD(TIMESTAMP(e.exam_date, e.start_time), INTERVAL e.duration_minutes MINUTE)
              ),
              '%Y-%m-%d %H:%i:%s'
-           ) AS closes_at,
-           CASE
-             WHEN NOW() >= COALESCE(x.start_at, TIMESTAMP(e.exam_date, e.start_time))
-              AND NOW() < COALESCE(
-                    x.end_at,
-                    DATE_ADD(TIMESTAMP(e.exam_date, e.start_time), INTERVAL e.duration_minutes MINUTE)
-                  )
-             THEN 1
-             ELSE 0
-           END AS window_open
+           ) AS closes_at
          FROM exams e
          JOIN course_enrollments ce
            ON ce.course_batch_id = e.course_batch_id
@@ -8534,10 +8497,6 @@ app.post(
                       server_now_unix: now,
                       resumed: true
                     });
-                  }
-
-                  if (Number(exam.window_open) !== 1) {
-                    return res.status(409).json({ message: "Exam is outside your allowed time window." });
                   }
 
                   const nextAttempt = previous ? Number(previous.attempt_number) + 1 : 1;
