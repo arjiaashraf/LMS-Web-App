@@ -34,7 +34,8 @@ function StudentAssignments() {
   const [search, setSearch] = useState("");
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [studentId, setStudentId] = useState<number | null>(null);
-  
+  const [submitting, setSubmitting] = useState(false);
+
   // Submission modal states
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [selectedAssignment, setSelectedAssignment] = useState<Assignment | null>(null);
@@ -47,17 +48,22 @@ function StudentAssignments() {
   useEffect(() => {
     const userStr = localStorage.getItem("user");
     if (!userStr) {
-      navigate("/login");
+      navigate("/login", { replace: true });
       return;
     }
     try {
       const userData = JSON.parse(userStr);
+      if (userData.role !== "student" || typeof userData.token !== "string" || !userData.token) {
+        navigate("/login", { replace: true });
+        return;
+      }
       if (userData.id) {
         setStudentId(userData.id);
         fetchStudentAssignments(userData.id);
       }
     } catch (e) {
       console.error("Error parsing user session", e);
+      navigate("/login", { replace: true });
     }
   }, [navigate]);
 
@@ -65,8 +71,10 @@ function StudentAssignments() {
     try {
       const res = await fetch(`/api/student/assignments/${id}`);
       const data = await res.json();
-      if (res.ok) {
+      if (res.ok && Array.isArray(data)) {
         setAssignments(data);
+      } else {
+        console.error("Assignments API error:", data);
       }
     } catch (err) {
       console.error("Error fetching student assignments:", err);
@@ -87,8 +95,9 @@ function StudentAssignments() {
 
   const handleSubmitAssignment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedAssignment || !studentId) return;
+    if (!selectedAssignment || !studentId || submitting) return;
 
+    setSubmitting(true);
     try {
       const res = await fetch("/api/student/submit-assignment", {
         method: "POST",
@@ -114,6 +123,8 @@ function StudentAssignments() {
     } catch (err) {
       console.error("Error submitting assignment:", err);
       alert("Server error while submitting assignment.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -238,13 +249,13 @@ function StudentAssignments() {
                       <div className="flex items-center gap-2 text-slate-500">
                         <CalendarDays size={17} />
                         <span>
-  Due: {new Date(assignment.due_date).toLocaleDateString("en-PK", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    timeZone: "Asia/Karachi",
-  })}
-</span>
+                          Due: {new Date(assignment.due_date).toLocaleDateString("en-PK", {
+                            day: "2-digit",
+                            month: "short",
+                            year: "numeric",
+                            timeZone: "Asia/Karachi",
+                          })}
+                        </span>
                       </div>
                       <div className="flex items-center gap-2 text-slate-500">
                         <Award size={17} />
@@ -262,36 +273,36 @@ function StudentAssignments() {
                 </div>
 
                 {/* RIGHT */}
-<div className="flex lg:flex-col gap-3 lg:min-w-32">
-  <button
-    type="button"
-    disabled={assignment.status === "Submitted" || assignment.status === "Graded"}
-    onClick={() => {
-      setSelectedAssignment(assignment);
-      setSubmissionText("");
-      setFileUrl("");
-      setFileName("");
-      setShowSubmitModal(true);
-    }}
-    className={`px-5 py-2.5 rounded-lg font-medium transition flex items-center justify-center gap-2 ${
-      assignment.status === "Submitted" || assignment.status === "Graded"
-        ? "bg-gray-300 text-gray-600 cursor-not-allowed"
-        : "bg-blue-600 hover:bg-blue-700 text-white"
-    }`}
-  >
-    {assignment.status === "Submitted" || assignment.status === "Graded" ? (
-      <CheckCircle size={16} />
-    ) : (
-      <Send size={16} />
-    )}
+                <div className="flex lg:flex-col gap-3 lg:min-w-32">
+                  <button
+                    type="button"
+                    disabled={assignment.status === "Submitted" || assignment.status === "Graded"}
+                    onClick={() => {
+                      setSelectedAssignment(assignment);
+                      setSubmissionText("");
+                      setFileUrl("");
+                      setFileName("");
+                      setShowSubmitModal(true);
+                    }}
+                    className={`px-5 py-2.5 rounded-lg font-medium transition flex items-center justify-center gap-2 ${
+                      assignment.status === "Submitted" || assignment.status === "Graded"
+                        ? "bg-gray-300 text-gray-600 cursor-not-allowed"
+                        : "bg-blue-600 hover:bg-blue-700 text-white"
+                    }`}
+                  >
+                    {assignment.status === "Submitted" || assignment.status === "Graded" ? (
+                      <CheckCircle size={16} />
+                    ) : (
+                      <Send size={16} />
+                    )}
 
-    {assignment.status === "Graded"
-      ? "Graded"
-      : assignment.status === "Submitted"
-      ? "Submitted"
-      : "Submit Work"}
-  </button>
-</div>
+                    {assignment.status === "Graded"
+                      ? "Graded"
+                      : assignment.status === "Submitted"
+                      ? "Submitted"
+                      : "Submit Work"}
+                  </button>
+                </div>
               </div>
             </div>
           ))}
@@ -347,9 +358,10 @@ function StudentAssignments() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium"
+                  disabled={submitting}
+                  className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50"
                 >
-                  Submit Assignment
+                  {submitting ? "Submitting..." : "Submit Assignment"}
                 </button>
               </div>
             </form>

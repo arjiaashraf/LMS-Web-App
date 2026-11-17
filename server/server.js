@@ -3568,7 +3568,6 @@ app.get('/api/student/assignments/:studentId', (req, res) => {
       a.course_batch_id,
       a.title,
       a.instructions,
-      a.issue_date,
       a.due_date,
       a.total_marks,
 
