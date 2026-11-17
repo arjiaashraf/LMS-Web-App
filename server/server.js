@@ -3023,27 +3023,59 @@ app.get('/api/student/dashboard/:id', async (req, res) => {
 
 app.post('/api/admin/courses', (req, res) => {
   const { title, description, learning_objectives, schedule, thumbnail, fee, category, level, duration } = req.body;
-  const code = 'CRS-' + Math.floor(1000 + Math.random() * 9000);
-  const query = `
-    INSERT INTO courses (title, code, description, learning_objectives, schedule, thumbnail, fee, category, level, duration, status, proposed_by) 
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Published', NULL)
+  const cleanTitle = String(title || '').trim();
+
+  const dupCheck = `
+    SELECT id FROM courses
+    WHERE LOWER(TRIM(title)) = LOWER(?)
+      AND proposed_by IS NULL
+      AND created_at >= DATE_SUB(NOW(), INTERVAL 15 SECOND)
+    LIMIT 1
   `;
-  db.query(query, [title, code, description, learning_objectives || '', schedule || '', thumbnail || '', fee || 0, category || 'Academics', level || 'Beginner', duration || '4 Weeks'], (err, result) => {
-    if (err) return res.status(500).json({ message: "Database error", error: err });
-    res.status(201).json({ message: "Course created and published successfully by Admin!" });
+
+  db.query(dupCheck, [cleanTitle], (dupErr, existing) => {
+    if (!dupErr && existing && existing.length > 0) {
+      return res.status(200).json({ message: "Course created and published successfully by Admin!" });
+    }
+
+    const code = 'CRS-' + Math.floor(1000 + Math.random() * 9000);
+    const query = `
+      INSERT INTO courses (title, code, description, learning_objectives, schedule, thumbnail, fee, category, level, duration, status, proposed_by) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Published', NULL)
+    `;
+    db.query(query, [cleanTitle, code, description, learning_objectives || '', schedule || '', thumbnail || '', fee || 0, category || 'Academics', level || 'Beginner', duration || '4 Weeks'], (err, result) => {
+      if (err) return res.status(500).json({ message: "Database error", error: err });
+      res.status(201).json({ message: "Course created and published successfully by Admin!" });
+    });
   });
 });
 
 app.post('/api/instructor/propose-course', (req, res) => {
   const { title, description, learning_objectives, schedule, thumbnail, fee, category, level, duration, instructor_id } = req.body;
-  const code = 'CRS-' + Math.floor(1000 + Math.random() * 9000);
-  const query = `
-    INSERT INTO courses (title, code, description, learning_objectives, schedule, thumbnail, fee, category, level, duration, status, proposed_by) 
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending Approval', ?)
+  const cleanTitle = String(title || '').trim();
+
+  const dupCheck = `
+    SELECT id FROM courses
+    WHERE LOWER(TRIM(title)) = LOWER(?)
+      AND proposed_by = ?
+      AND created_at >= DATE_SUB(NOW(), INTERVAL 15 SECOND)
+    LIMIT 1
   `;
-  db.query(query, [title, code, description, learning_objectives || '', schedule || '', thumbnail || '', fee || 0, category || 'Academics', level || 'Beginner', duration || '4 Weeks', instructor_id], (err, result) => {
-    if (err) return res.status(500).json({ message: "Database error", error: err });
-    res.status(201).json({ message: "Course proposed successfully! Waiting for Admin approval." });
+
+  db.query(dupCheck, [cleanTitle, instructor_id], (dupErr, existing) => {
+    if (!dupErr && existing && existing.length > 0) {
+      return res.status(200).json({ message: "Course proposed successfully! Waiting for Admin approval." });
+    }
+
+    const code = 'CRS-' + Math.floor(1000 + Math.random() * 9000);
+    const query = `
+      INSERT INTO courses (title, code, description, learning_objectives, schedule, thumbnail, fee, category, level, duration, status, proposed_by) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending Approval', ?)
+    `;
+    db.query(query, [cleanTitle, code, description, learning_objectives || '', schedule || '', thumbnail || '', fee || 0, category || 'Academics', level || 'Beginner', duration || '4 Weeks', instructor_id], (err, result) => {
+      if (err) return res.status(500).json({ message: "Database error", error: err });
+      res.status(201).json({ message: "Course proposed successfully! Waiting for Admin approval." });
+    });
   });
 });
 

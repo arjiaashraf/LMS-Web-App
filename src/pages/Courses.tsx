@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import {
@@ -134,6 +133,7 @@ function Courses() {
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [newCourse, setNewCourse] = useState(initialCourse);
+  const [creatingCourse, setCreatingCourse] = useState(false);
 
   const [showDetailModal, setShowDetailModal] = useState(false);
   const [selectedCourseDetail, setSelectedCourseDetail] =
@@ -148,6 +148,7 @@ function Courses() {
   const [showBatchModal, setShowBatchModal] = useState(false);
   const [selectedCourseId, setSelectedCourseId] =
     useState<number | null>(null);
+  const [creatingBatch, setCreatingBatch] = useState(false);
 
   const [instructors, setInstructors] = useState<Instructor[]>([]);
   const [
@@ -575,6 +576,8 @@ function Courses() {
     e: React.FormEvent
   ) => {
     e.preventDefault();
+    if (creatingCourse) return;
+    setCreatingCourse(true);
 
     try {
       const response = await fetch(
@@ -600,6 +603,8 @@ function Courses() {
     } catch (error) {
       console.error("Create course error:", error);
       alert("Unable to create course.");
+    } finally {
+      setCreatingCourse(false);
     }
   };
 
@@ -771,7 +776,8 @@ function Courses() {
   const handleCreateBatch = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!selectedCourseId) return;
+    if (!selectedCourseId || creatingBatch) return;
+    setCreatingBatch(true);
 
     try {
       const response = await fetch(
@@ -801,6 +807,8 @@ function Courses() {
     } catch (error) {
       console.error("Create batch error:", error);
       alert("Unable to create batch.");
+    } finally {
+      setCreatingBatch(false);
     }
   };
 
@@ -2074,9 +2082,10 @@ function Courses() {
 
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700"
+                  disabled={creatingCourse}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50"
                 >
-                  Publish Course Directly
+                  {creatingCourse ? "Publishing..." : "Publish Course Directly"}
                 </button>
               </div>
             </form>
@@ -2254,9 +2263,10 @@ function Courses() {
 
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700"
+                  disabled={creatingBatch}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg font-medium hover:bg-purple-700 disabled:opacity-50"
                 >
-                  Create Batch & Assign
+                  {creatingBatch ? "Creating..." : "Create Batch & Assign"}
                 </button>
               </div>
             </form>
