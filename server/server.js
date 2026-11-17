@@ -3049,7 +3049,7 @@ app.post('/api/instructor/propose-course', (req, res) => {
 
 app.get('/api/admin/courses', (req, res) => {
   const query = `
-    SELECT c.*, u.name AS proposer_name, 
+    SELECT c.*, MAX(u.name) AS proposer_name, 
            GROUP_CONCAT(DISTINCT inst.name SEPARATOR ', ') AS assigned_instructors
     FROM courses c
     LEFT JOIN users u ON c.proposed_by = u.id
@@ -3419,14 +3419,14 @@ app.get('/api/instructor/batches/:instructorId', (req, res) => {
   const query = `
     SELECT 
       c.id AS course_id,
-      c.title AS course_title,
-      c.description,
-      c.learning_objectives,
-      c.duration,
-      c.level,
-      c.schedule,
-      c.category,
-      c.thumbnail,
+      MAX(c.title) AS course_title,
+      MAX(c.description) AS description,
+      MAX(c.learning_objectives) AS learning_objectives,
+      MAX(c.duration) AS duration,
+      MAX(c.level) AS level,
+      MAX(c.schedule) AS schedule,
+      MAX(c.category) AS category,
+      MAX(c.thumbnail) AS thumbnail,
       GROUP_CONCAT(DISTINCT cb.timing_days SEPARATOR ' | ') AS timing_days,
       GROUP_CONCAT(DISTINCT CONCAT(cb.start_time, ' - ', cb.end_time) SEPARATOR ' | ') AS start_time,
       GROUP_CONCAT(DISTINCT u_all.name SEPARATOR ', ') AS assigned_instructors,
