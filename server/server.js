@@ -8434,7 +8434,7 @@ app.post(
       await examExtensionBegin();
       transactionStarted = true;
 
-      const exams = await examExtensionQuery(
+     const exams = await examExtensionQuery(
         `SELECT
            e.id,
            e.title,
@@ -8491,8 +8491,7 @@ app.post(
            ON x.exam_id = e.id
           AND x.student_id = ?
 
-         WHERE e.id = ?
-         FOR UPDATE`,
+         WHERE e.id = ?`,
         [studentId, studentId, examId]
       );
 
@@ -8691,14 +8690,15 @@ app.post(
 
       console.error("Start exam with extension error:", err);
 
-      if (err.code === "ER_DUP_ENTRY") {
+     if (err.code === "ER_DUP_ENTRY") {
         return res.status(409).json({
           message: "Attempt already exists. Refresh and retry."
         });
       }
 
       return res.status(500).json({
-        message: "Failed to start examination."
+        message: "Failed to start examination.",
+        error: err.sqlMessage || err.message
       });
     }
   }
