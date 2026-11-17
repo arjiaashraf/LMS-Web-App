@@ -205,6 +205,10 @@ const createLoginToken = (user) => {
    ================================================= */
 
 const authenticateToken = async (req, res, next) => {
+  if (req.user && req.user.id) {
+    return next();
+  }
+
   const authorization = req.headers.authorization || "";
 
   const match = /^Bearer\s+(.+)$/i.exec(authorization);
@@ -259,7 +263,7 @@ const users = await authQuery(
 
     const user = users[0];
 
-    if (Number(user.email_verified) !== 1) {
+   if (user.role !== "admin" && Number(user.email_verified) !== 1) {
       return res.status(403).json({
         message: "Email verification required."
       });
