@@ -3591,13 +3591,16 @@ app.get('/api/student/assignments/:studentId', (req, res) => {
     LEFT JOIN users u
       ON u.id = cb.instructor_id
 
-    LEFT JOIN assignment_submissions s
-      ON s.id = (
-        SELECT MAX(s2.id)
-        FROM assignment_submissions s2
-        WHERE s2.assignment_id = a.id
-          AND s2.student_id = ?
-      )
+    LEFT JOIN (
+      SELECT s1.*
+      FROM assignment_submissions s1
+      INNER JOIN (
+        SELECT assignment_id, MAX(id) AS max_id
+        FROM assignment_submissions
+        WHERE student_id = ?
+        GROUP BY assignment_id
+      ) latest ON latest.max_id = s1.id
+    ) s ON s.assignment_id = a.id
 
     WHERE EXISTS (
       SELECT 1
@@ -3611,12 +3614,11 @@ app.get('/api/student/assignments/:studentId', (req, res) => {
   `;
 
   db.query(query, [studentId, studentId], (err, results) => {
-   if (err) {
+    if (err) {
       console.error('Student assignments error:', err);
 
       return res.status(500).json({
-        message: 'Failed to load student assignments',
-        error: err.sqlMessage || err.message
+        message: 'Failed to load student assignments'
       });
     }
 
@@ -4123,7 +4125,7 @@ app.get('/api/admin/assignment-submissions/:assignmentId', (req, res) => {
     });
   }
 
-  const query = `
+ const query = `
     SELECT
       u.id AS student_id,
       u.name AS student_name,
@@ -4141,20 +4143,21 @@ app.get('/api/admin/assignment-submissions/:assignmentId', (req, res) => {
       AND ce.status = 'Active'
     JOIN users u
       ON u.id = ce.student_id
-    LEFT JOIN assignment_submissions s
-      ON s.id = (
-        SELECT s2.id
-        FROM assignment_submissions s2
-        WHERE s2.assignment_id = a.id
-          AND s2.student_id = ce.student_id
-        ORDER BY s2.submitted_at DESC, s2.id DESC
-        LIMIT 1
-      )
+    LEFT JOIN (
+      SELECT s1.*
+      FROM assignment_submissions s1
+      INNER JOIN (
+        SELECT assignment_id, student_id, MAX(id) AS max_id
+        FROM assignment_submissions
+        WHERE assignment_id = ?
+        GROUP BY assignment_id, student_id
+      ) latest ON latest.max_id = s1.id
+    ) s ON s.assignment_id = a.id AND s.student_id = ce.student_id
     WHERE a.id = ?
     ORDER BY u.name ASC
   `;
 
-  db.query(query, [assignmentId], (err, results) => {
+  db.query(query, [assignmentId, assignmentId], (err, results) => {
     if (err) {
       console.error('Admin submissions error:', err);
       return res.status(500).json({
@@ -5575,13 +5578,15 @@ app.get('/api/student/exams/:studentId', (req, res) => {
      AND x.student_id = ce.student_id
 
     /* Latest result for this student and exam */
-    LEFT JOIN exam_results er
-      ON er.id = (
-        SELECT MAX(er2.id)
-        FROM exam_results er2
-        WHERE er2.exam_id = e.id
-          AND er2.student_id = ce.student_id
-      )
+    LEFT JOIN (
+      SELECT er1.*
+      FROM exam_results er1
+      INNER JOIN (
+        SELECT exam_id, student_id, MAX(id) AS max_id
+        FROM exam_results
+        GROUP BY exam_id, student_id
+      ) latest_er ON latest_er.max_id = er1.id
+    ) er ON er.exam_id = e.id AND er.student_id = ce.student_id
 
     WHERE c.status = 'Published'
       AND e.exam_status = 'Published'
@@ -9104,7 +9109,7 @@ app.get(
           });
         }
 
-        const query = `
+       const query = `
           SELECT
             a.id AS assignment_id,
             a.title AS assignment_title,
@@ -9131,13 +9136,15 @@ app.get(
             ON u.id = ce.student_id
            AND u.role = 'student'
 
-          LEFT JOIN assignment_submissions s
-            ON s.id = (
-              SELECT MAX(s2.id)
-              FROM assignment_submissions s2
-              WHERE s2.assignment_id = a.id
-                AND s2.student_id = u.id
-            )
+          LEFT JOIN (
+            SELECT s1.*
+            FROM assignment_submissions s1
+            INNER JOIN (
+              SELECT assignment_id, student_id, MAX(id) AS max_id
+              FROM assignment_submissions
+              GROUP BY assignment_id, student_id
+            ) latest ON latest.max_id = s1.id
+          ) s ON s.assignment_id = a.id AND s.student_id = u.id
 
           WHERE a.course_batch_id = ?
 
