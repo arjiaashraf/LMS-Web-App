@@ -8434,7 +8434,7 @@ app.post(
       await examExtensionBegin();
       transactionStarted = true;
 
-     const exams = await examExtensionQuery(
+      const exams = await examExtensionQuery(
         `SELECT
            e.id,
            e.title,
@@ -8561,14 +8561,12 @@ app.post(
            AND student_id = ?
 
          ORDER BY attempt_number DESC, id DESC
-         LIMIT 1
-         FOR UPDATE`,
+         LIMIT 1`,
         [examId, studentId]
       );
 
       const previous = attempts[0];
 
-      // Existing attempt can be resumed without resetting timer.
       if (previous?.status === "InProgress") {
         const expiry = Number(previous.expires_unix);
         const now = Number(previous.server_now_unix);
@@ -8690,7 +8688,7 @@ app.post(
 
       console.error("Start exam with extension error:", err);
 
-     if (err.code === "ER_DUP_ENTRY") {
+      if (err.code === "ER_DUP_ENTRY") {
         return res.status(409).json({
           message: "Attempt already exists. Refresh and retry."
         });
