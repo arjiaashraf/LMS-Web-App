@@ -3611,11 +3611,12 @@ app.get('/api/student/assignments/:studentId', (req, res) => {
   `;
 
   db.query(query, [studentId, studentId], (err, results) => {
-    if (err) {
+   if (err) {
       console.error('Student assignments error:', err);
 
       return res.status(500).json({
-        message: 'Failed to load student assignments'
+        message: 'Failed to load student assignments',
+        error: err.sqlMessage || err.message
       });
     }
 
