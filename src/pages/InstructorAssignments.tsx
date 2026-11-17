@@ -368,7 +368,7 @@ function InstructorAssignments({
     setGradeFeedback(submission.feedback || "");
   };
 
-  const handlePreviewFile = async (fileUrl: string) => {
+ const handlePreviewFile = async (fileUrl: string) => {
     const previewTab = window.open("", "_blank");
 
     if (!previewTab) {
@@ -378,6 +378,20 @@ function InstructorAssignments({
 
     try {
       const normalizedUrl = fileUrl.trim();
+
+      // Support Base64 Data URLs uploaded by students (PDF, images, docs)
+      if (normalizedUrl.startsWith("data:")) {
+        const res = await fetch(normalizedUrl);
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+
+        previewTab.location.href = blobUrl;
+
+        window.setTimeout(() => {
+          URL.revokeObjectURL(blobUrl);
+        }, 60000);
+        return;
+      }
 
       // Only backend-owned relative paths are accepted.
       // Do not send JWT credentials to third-party URLs.
