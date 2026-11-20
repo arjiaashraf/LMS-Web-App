@@ -917,6 +917,8 @@ const route = `${req.baseUrl}${req.path}`.replace(/^\/api(?=\/)/, "");
         : deny();
     }
 
+    
+
     // =============================================
     // ROUTES WITH INSTRUCTOR ID IN URL
     // =============================================
@@ -928,8 +930,7 @@ const route = `${req.baseUrl}${req.path}`.replace(/^\/api(?=\/)/, "");
       /^\/teacher\/assignment-batches\/(\d+)$/,
       /^\/teacher\/assignments\/(\d+)$/,
       /^\/teacher\/class-schedules\/(\d+)$/,
-      /^\/teacher\/courses\/(\d+)$/,
-      /^\/teacher\/exams\/(\d+)$/
+      /^\/teacher\/courses\/(\d+)$/
     ];
 
     for (const pattern of personalRoutes) {
