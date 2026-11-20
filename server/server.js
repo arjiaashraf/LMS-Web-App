@@ -5036,79 +5036,99 @@ app.get('/api/teacher/exam-results/:examId/:teacherId', (req, res) => {
     });
   }
 
-  // TODO: Enforce JWT authentication and verify instructor identity.
-
   const checkQuery = `
     SELECT e.id, e.course_batch_id
     FROM exams e
     JOIN course_batches cb ON cb.id = e.course_batch_id
+    LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
     WHERE e.id = ?
-      AND e.teacher_id = ?
-      AND cb.instructor_id = ?
+      AND (
+        e.teacher_id = ?
+        OR cb.instructor_id = ?
+        OR bi.instructor_id = ?
+      )
     LIMIT 1
   `;
 
-  db.query(checkQuery, [examId, teacherId, teacherId], (checkErr, exams) => {
-    if (checkErr) {
-      console.error('Exam verification error:', checkErr);
-      return res.status(500).json({
-        message: 'Database error.'
-      });
-    }
-
-    if (!exams.length) {
-      return res.status(403).json({
-        message: 'Exam not found or instructor not authorized.'
-      });
-    }
-
-    const batchId = exams[0].course_batch_id;
-
-    const query = `
-      SELECT
-        u.id AS student_id,
-        u.name AS student_name,
-        u.email AS student_email,
-
-        er.id AS result_id,
-        er.marks_obtained,
-        er.grade,
-        er.feedback,
-
-        COALESCE(er.status, 'Pending') AS status
-
-      FROM course_enrollments ce
-
-      JOIN users u
-        ON u.id = ce.student_id
-
-      LEFT JOIN exam_results er
-        ON er.id = (
-          SELECT MAX(er2.id)
-          FROM exam_results er2
-          WHERE er2.exam_id = ?
-            AND er2.student_id = u.id
-        )
-
-      WHERE ce.course_batch_id = ?
-        AND ce.status = 'Active'
-        AND u.role = 'student'
-
-      ORDER BY u.name ASC
-    `;
-
-    db.query(query, [examId, batchId], (err, results) => {
-      if (err) {
-        console.error('Exam students error:', err);
-
+  db.query(
+    checkQuery,
+    [examId, teacherId, teacherId, teacherId],
+    (checkErr, exams) => {
+      if (checkErr) {
+        console.error('Exam verification error:', checkErr);
         return res.status(500).json({
-          message: 'Failed to load exam students.'
+          message: 'Database error.',
+          error: checkErr.sqlMessage || checkErr.message
         });
       }
 
-      res.json(results);
-    });
-  });
+      if (!exams.length) {
+        return res.status(403).json({
+          message: 'Exam not found or instructor not authorized.'
+        });
+      }
+
+      const batchId = exams[0].course_batch_id;
+
+      const query = `
+        SELECT
+          u.id AS student_id,
+          u.name AS student_name,
+          u.email AS student_email,
+
+          er.id AS result_id,
+          er.marks_obtained,
+          er.grade,
+          er.feedback,
+
+          COALESCE(er.status, 'Pending') AS status
+
+        FROM course_enrollments ce
+
+        JOIN users u
+          ON u.id = ce.student_id
+
+        LEFT JOIN exam_results er
+          ON er.exam_id = ?
+         AND er.student_id = u.id
+
+        WHERE ce.course_batch_id = ?
+          AND ce.status = 'Active'
+          AND u.role = 'student'
+
+        ORDER BY u.id DESC, u.name ASC
+      `;
+
+      db.query(query, [examId, batchId], (err, results) => {
+        if (err) {
+          console.error('Exam students error:', err);
+
+          return res.status(500).json({
+            message: 'Failed to load exam students.',
+            error: err.sqlMessage || err.message
+          });
+        }
+
+        const deduped = [];
+        const seenStudents = new Set();
+
+        for (const row of results) {
+          if (!seenStudents.has(row.student_id)) {
+            seenStudents.add(row.student_id);
+            deduped.push(row);
+          }
+        }
+
+        deduped.sort((a, b) =>
+          String(a.student_name || '').localeCompare(
+            String(b.student_name || '')
+          )
+        );
+
+        res.json(deduped);
+      });
+    }
+  );
 });
 
 // ========== INSTRUCTOR - ADD EXAM QUESTION ==========
