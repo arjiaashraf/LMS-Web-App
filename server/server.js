@@ -8209,35 +8209,30 @@ app.put(
       });
     }
 
-    let transactionStarted = false;
-
     try {
-      await examExtensionBegin();
-      transactionStarted = true;
-
-     const exams = await examExtensionQuery(
-  `SELECT
-     e.id,
-     e.exam_mode,
-     e.exam_status,
-     e.result_published,
-     e.course_batch_id
-   FROM exams e
-   JOIN course_batches cb ON cb.id = e.course_batch_id
-   LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
-   WHERE e.id = ?
-     AND (
-       e.teacher_id = ?
-       OR cb.instructor_id = ?
-       OR bi.instructor_id = ?
-     )
-   LIMIT 1`,
-  [examId, teacherId, teacherId, teacherId]
-);
+      const exams = await examExtensionQuery(
+        `SELECT
+           e.id,
+           e.exam_mode,
+           e.exam_status,
+           e.result_published,
+           e.course_batch_id
+         FROM exams e
+         JOIN course_batches cb
+           ON cb.id = e.course_batch_id
+         LEFT JOIN batch_instructors bi
+           ON bi.batch_id = cb.id
+         WHERE e.id = ?
+           AND (
+             e.teacher_id = ?
+             OR cb.instructor_id = ?
+             OR bi.instructor_id = ?
+           )
+         LIMIT 1`,
+        [examId, teacherId, teacherId, teacherId]
+      );
 
       if (!exams.length) {
-        await examExtensionRollback();
-
         return res.status(403).json({
           message: "Exam not found or access denied."
         });
@@ -8249,16 +8244,12 @@ app.put(
         exam.exam_mode !== "Online" ||
         exam.exam_status !== "Published"
       ) {
-        await examExtensionRollback();
-
         return res.status(409).json({
           message: "Only published Online exams support extensions."
         });
       }
 
       if (Number(exam.result_published) === 1) {
-        await examExtensionRollback();
-
         return res.status(409).json({
           message:
             "Results are already published. This exam cannot be extended."
@@ -8276,8 +8267,6 @@ app.put(
       );
 
       if (!enrolled.length) {
-        await examExtensionRollback();
-
         return res.status(403).json({
           message: "Student is not actively enrolled."
         });
@@ -8300,8 +8289,6 @@ app.put(
         windowMinutes > 20160 ||
         Number(windows[0].future_end) !== 1
       ) {
-        await examExtensionRollback();
-
         return res.status(400).json({
           message:
             "Closing time must be in the future and after opening time (maximum 14 days)."
@@ -8317,16 +8304,13 @@ app.put(
          WHERE exam_id = ?
            AND student_id = ?
          ORDER BY attempt_number DESC, id DESC
-         LIMIT 1
-         FOR UPDATE`,
+         LIMIT 1`,
         [examId, studentId]
       );
 
       const existingAttempt = attempts[0];
 
       if (existingAttempt?.status === "InProgress") {
-        await examExtensionRollback();
-
         return res.status(409).json({
           message:
             "Student has an InProgress attempt. Finalize it before granting a retake."
@@ -8335,8 +8319,6 @@ app.put(
 
       // A completed previous attempt needs additional permission.
       if (existingAttempt && extraAttempts < 1) {
-        await examExtensionRollback();
-
         return res.status(409).json({
           message:
             "This student already has an attempt. Allow at least one extra attempt."
@@ -8372,23 +8354,17 @@ app.put(
         ]
       );
 
-      await examExtensionCommit();
-      transactionStarted = false;
-
       return res.json({
         message: "Student extension saved successfully.",
         exam_id: examId,
         student_id: studentId
       });
     } catch (err) {
-      if (transactionStarted) {
-        await examExtensionRollback();
-      }
-
       console.error("Extension save error:", err);
 
       return res.status(500).json({
-        message: "Could not save student extension."
+        message: "Could not save student extension.",
+        error: err.sqlMessage || err.message
       });
     }
   }
