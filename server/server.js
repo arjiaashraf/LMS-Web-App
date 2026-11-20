@@ -7290,7 +7290,7 @@ app.put(
   '/api/teacher/exams/:examId/publish-results',
   (req, res) => {
     const examId = Number(req.params.examId);
-    const teacherId = Number(req.body?.teacher_id);
+    const teacherId = Number(req.body?.teacher_id || req.user?.id);
 
     if (
       ![examId, teacherId].every(
@@ -7302,414 +7302,338 @@ app.put(
       });
     }
 
-    db.beginTransaction((beginErr) => {
-      if (beginErr) {
-        console.error('Begin publication:', beginErr);
+    const fail = (status, message, extra = {}) => {
+      return res.status(status).json({ message, ...extra });
+    };
 
-        return res.status(500).json({
-          message: 'Could not begin publication.'
-        });
-      }
+    /* ========== VERIFY EXAM ========== */
 
-      const fail = (status, message) => {
-        db.rollback(() => {
-          return res.status(status).json({ message });
-        });
-      };
+    const verifySql = `
+      SELECT
+        e.id,
+        e.exam_mode,
+        e.exam_status,
+        e.result_published,
+        e.course_batch_id,
+        e.exam_date,
+        e.start_time,
+        e.duration_minutes,
+        e.total_marks
+      FROM exams e
+      JOIN course_batches cb
+        ON cb.id = e.course_batch_id
+      LEFT JOIN batch_instructors bi
+        ON bi.batch_id = cb.id
+      WHERE e.id = ?
+        AND (
+          e.teacher_id = ?
+          OR cb.instructor_id = ?
+          OR bi.instructor_id = ?
+        )
+      LIMIT 1
+    `;
 
-      /* ========== VERIFY EXAM ========== */
+    db.query(
+      verifySql,
+      [examId, teacherId, teacherId, teacherId],
+      (examErr, examRows) => {
+        if (examErr) {
+          console.error('Verify exam:', examErr);
 
-      const verifySql = `
-        SELECT
-          id,
-          exam_mode,
-          exam_status,
-          result_published,
-          course_batch_id,
-          exam_date,
-          start_time,
-          duration_minutes,
-          total_marks,
-
-          CASE
-            WHEN NOW() >= DATE_ADD(
-              TIMESTAMP(exam_date, start_time),
-              INTERVAL duration_minutes MINUTE
-            )
-            THEN 1
-            ELSE 0
-          END AS exam_window_ended
-
-        FROM exams
-        WHERE id = ?
-          AND teacher_id = ?
-        FOR UPDATE
-      `;
-
-      db.query(
-        verifySql,
-        [examId, teacherId],
-        (examErr, examRows) => {
-          if (examErr) {
-            console.error('Verify exam:', examErr);
-
-            return fail(
-              500,
-              'Could not verify exam.'
-            );
-          }
-
-          if (examRows.length !== 1) {
-            return fail(
-              403,
-              'Exam not found or access denied.'
-            );
-          }
-
-          const exam = examRows[0];
-          
-if (exam.exam_mode !== "Online") {
-  return fail(
-    409,
-    "Only Online Exam results can be published."
-  );
-}
-
-
-          if (exam.exam_status !== 'Published') {
-            return fail(
-              409,
-              'Exam must be published first.'
-            );
-          }
-
-          if (Number(exam.result_published) === 1) {
-            return fail(
-              409,
-              'Results have already been published.'
-            );
-          }
-
-          if (
-            !Number.isFinite(Number(exam.total_marks)) ||
-            Number(exam.total_marks) <= 0
-          ) {
-            return fail(
-              409,
-              'Exam total marks must be greater than zero.'
-            );
-          }
-
-          if (
-            exam.exam_mode === 'Online' &&
-            Number(exam.exam_window_ended) !== 1
-          ) {
-            return fail(
-              409,
-              'Wait until the scheduled online exam window ends.'
-            );
-          }
-
-          /* ========== CHECK STUDENT EXTENSIONS ========== */
-
-          const extensionSql = `
-            SELECT COUNT(*) AS active_extensions
-
-            FROM student_exam_extensions x
-
-            JOIN course_enrollments ce
-              ON ce.student_id = x.student_id
-             AND ce.course_batch_id = ?
-             AND ce.status = 'Active'
-
-            WHERE x.exam_id = ?
-              AND x.end_at > NOW()
-          `;
-
-          db.query(
-            extensionSql,
-            [exam.course_batch_id, examId],
-            (extensionErr, extensionRows) => {
-              if (extensionErr) {
-                console.error(
-                  'Extension verification:',
-                  extensionErr
-                );
-
-                return fail(
-                  500,
-                  'Could not verify student extensions.'
-                );
-              }
-
-              if (
-                Number(
-                  extensionRows[0]?.active_extensions || 0
-                ) > 0
-              ) {
-                return fail(
-                  409,
-                  'Some students have active or upcoming extensions. Wait until all extension windows end.'
-                );
-              }
-
-              /* ========== CHECK GRADING ========== */
-
-              const checkSql =
-                exam.exam_mode === 'Online'
-                  ? `
-                    SELECT
-
-                      (
-                        SELECT COUNT(*)
-                        FROM exam_attempts a
-                        WHERE a.exam_id = ?
-                          AND a.status IN (
-                            'InProgress',
-                            'Submitted',
-                            'PendingReview'
-                          )
-                      ) AS pending,
-
-                      (
-                        SELECT COUNT(*)
-                        FROM exam_attempts a
-                        WHERE a.exam_id = ?
-                          AND a.status = 'Graded'
-                      ) AS graded,
-
-                      (
-                        SELECT COUNT(*)
-                        FROM exam_attempts a
-                        WHERE a.exam_id = ?
-                          AND a.status = 'Graded'
-
-                          AND NOT EXISTS (
-                            SELECT 1
-                            FROM exam_attempts newer
-                            WHERE newer.exam_id = a.exam_id
-                              AND newer.student_id = a.student_id
-                              AND (
-                                newer.attempt_number >
-                                  a.attempt_number
-                                OR (
-                                  newer.attempt_number =
-                                    a.attempt_number
-                                  AND newer.id > a.id
-                                )
-                              )
-                          )
-
-                          AND NOT EXISTS (
-                            SELECT 1
-                            FROM exam_results er
-                            WHERE er.exam_id = a.exam_id
-                              AND er.student_id = a.student_id
-                              AND er.status = 'Graded'
-                              AND er.marks_obtained IS NOT NULL
-                              AND er.source_attempt_id = a.id
-                              AND ABS(
-                                er.marks_obtained -
-                                COALESCE(a.total_score, 0)
-                              ) < 0.001
-                          )
-                      ) AS missing_results
-                  `
-                  : `
-                    SELECT
-
-                      (
-                        SELECT COUNT(*)
-                        FROM course_enrollments ce
-                        WHERE ce.course_batch_id = ?
-                          AND ce.status = 'Active'
-                          AND NOT EXISTS (
-                            SELECT 1
-                            FROM exam_results er
-                            WHERE er.exam_id = ?
-                              AND er.student_id = ce.student_id
-                              AND er.status = 'Graded'
-                              AND er.marks_obtained IS NOT NULL
-                          )
-                      ) AS pending,
-
-                      (
-                        SELECT COUNT(*)
-                        FROM exam_results er
-                        WHERE er.exam_id = ?
-                          AND er.status = 'Graded'
-                          AND er.marks_obtained IS NOT NULL
-                      ) AS graded,
-
-                      0 AS missing_results
-                  `;
-
-              const args =
-                exam.exam_mode === 'Online'
-                  ? [examId, examId, examId]
-                  : [
-                      exam.course_batch_id,
-                      examId,
-                      examId
-                    ];
-
-              db.query(
-                checkSql,
-                args,
-                (checkErr, checkRows) => {
-                  if (checkErr) {
-                    console.error(
-                      'Grading verification:',
-                      checkErr
-                    );
-
-                    return fail(
-                      500,
-                      'Could not verify grading and result synchronization.'
-                    );
-                  }
-
-                  const counts = checkRows[0];
-
-                  if (Number(counts.pending) > 0) {
-                    return fail(
-                      409,
-                      'Some exam attempts are incomplete or awaiting grading.'
-                    );
-                  }
-
-                  if (Number(counts.missing_results) > 0) {
-                    return fail(
-                      409,
-                      'Latest graded attempts are not synchronized with exam_results.'
-                    );
-                  }
-
-                  if (Number(counts.graded) === 0) {
-                    return fail(
-                      409,
-                      'No graded results are available to publish.'
-                    );
-                  }
-
-                  /* ========== CALCULATE GRADES ========== */
-
-                  const gradeSql = `
-                    UPDATE exam_results er
-
-                    JOIN exams e
-                      ON e.id = er.exam_id
-
-                    SET er.grade = CASE
-
-                      WHEN er.marks_obtained /
-                           e.total_marks * 100 >= 90
-                        THEN 'A+'
-
-                      WHEN er.marks_obtained /
-                           e.total_marks * 100 >= 80
-                        THEN 'A'
-
-                      WHEN er.marks_obtained /
-                           e.total_marks * 100 >= 70
-                        THEN 'B'
-
-                      WHEN er.marks_obtained /
-                           e.total_marks * 100 >= 60
-                        THEN 'C'
-
-                      WHEN er.marks_obtained /
-                           e.total_marks * 100 >= 50
-                        THEN 'D'
-
-                      ELSE 'F'
-
-                    END
-
-                    WHERE er.exam_id = ?
-                      AND er.status = 'Graded'
-                      AND er.marks_obtained IS NOT NULL
-                      AND e.total_marks > 0
-                  `;
-
-                  db.query(
-                    gradeSql,
-                    [examId],
-                    (gradeErr) => {
-                      if (gradeErr) {
-                        console.error(
-                          'Grade calculation:',
-                          gradeErr
-                        );
-
-                        return fail(
-                          500,
-                          'Could not calculate grades.'
-                        );
-                      }
-
-                      /* ========== PUBLISH RESULTS ========== */
-
-                      const publishSql = `
-                        UPDATE exams
-                        SET result_published = 1
-                        WHERE id = ?
-                          AND teacher_id = ?
-                          AND result_published = 0
-                      `;
-
-                      db.query(
-                        publishSql,
-                        [examId, teacherId],
-                        (publishErr, result) => {
-                          if (
-                            publishErr ||
-                            result.affectedRows !== 1
-                          ) {
-                            console.error(
-                              'Publish results:',
-                              publishErr
-                            );
-
-                            return fail(
-                              500,
-                              'Could not publish results.'
-                            );
-                          }
-
-                          db.commit((commitErr) => {
-                            if (commitErr) {
-                              console.error(
-                                'Publication commit:',
-                                commitErr
-                              );
-
-                              return db.rollback(() => {
-                                res.status(500).json({
-                                  message:
-                                    'Could not commit results publication.'
-                                });
-                              });
-                            }
-
-                            return res.json({
-                              message:
-                                'Results published successfully.',
-                              exam_id: examId,
-                              published: true
-                            });
-                          });
-                        }
-                      );
-                    }
-                  );
-                }
-              );
-            }
+          return fail(
+            500,
+            'Could not verify exam.',
+            { error: examErr.sqlMessage || examErr.message }
           );
         }
-      );
-    });
+
+        if (examRows.length !== 1) {
+          return fail(
+            403,
+            'Exam not found or access denied.'
+          );
+        }
+
+        const exam = examRows[0];
+
+        if (exam.exam_mode !== "Online") {
+          return fail(
+            409,
+            "Only Online Exam results can be published."
+          );
+        }
+
+        if (exam.exam_status !== 'Published') {
+          return fail(
+            409,
+            'Exam must be published first.'
+          );
+        }
+
+        if (Number(exam.result_published) === 1) {
+          return fail(
+            409,
+            'Results have already been published.'
+          );
+        }
+
+        if (
+          !Number.isFinite(Number(exam.total_marks)) ||
+          Number(exam.total_marks) <= 0
+        ) {
+          return fail(
+            409,
+            'Exam total marks must be greater than zero.'
+          );
+        }
+
+        /* ========== CHECK STUDENT EXTENSIONS ========== */
+
+        const extensionSql = `
+          SELECT COUNT(*) AS active_extensions
+
+          FROM student_exam_extensions x
+
+          JOIN course_enrollments ce
+            ON ce.student_id = x.student_id
+           AND ce.course_batch_id = ?
+           AND ce.status = 'Active'
+
+          WHERE x.exam_id = ?
+            AND x.end_at > NOW()
+        `;
+
+        db.query(
+          extensionSql,
+          [exam.course_batch_id, examId],
+          (extensionErr, extensionRows) => {
+            if (extensionErr) {
+              console.error(
+                'Extension verification:',
+                extensionErr
+              );
+
+              return fail(
+                500,
+                'Could not verify student extensions.',
+                { error: extensionErr.sqlMessage || extensionErr.message }
+              );
+            }
+
+            if (
+              Number(
+                extensionRows[0]?.active_extensions || 0
+              ) > 0
+            ) {
+              return fail(
+                409,
+                'Some students have active or upcoming extensions. Wait until all extension windows end.'
+              );
+            }
+
+            /* ========== CHECK GRADING ========== */
+
+            const checkSql = `
+              SELECT
+
+                (
+                  SELECT COUNT(*)
+                  FROM exam_attempts a
+                  WHERE a.exam_id = ?
+                    AND a.status IN (
+                      'InProgress',
+                      'Submitted',
+                      'PendingReview'
+                    )
+                ) AS pending,
+
+                (
+                  SELECT COUNT(*)
+                  FROM exam_attempts a
+                  WHERE a.exam_id = ?
+                    AND a.status = 'Graded'
+                ) AS graded,
+
+                (
+                  SELECT COUNT(*)
+                  FROM exam_attempts a
+                  WHERE a.exam_id = ?
+                    AND a.status = 'Graded'
+
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM exam_attempts newer
+                      WHERE newer.exam_id = a.exam_id
+                        AND newer.student_id = a.student_id
+                        AND (
+                          newer.attempt_number >
+                            a.attempt_number
+                          OR (
+                            newer.attempt_number =
+                              a.attempt_number
+                            AND newer.id > a.id
+                          )
+                        )
+                    )
+
+                    AND NOT EXISTS (
+                      SELECT 1
+                      FROM exam_results er
+                      WHERE er.exam_id = a.exam_id
+                        AND er.student_id = a.student_id
+                        AND er.status = 'Graded'
+                        AND er.marks_obtained IS NOT NULL
+                        AND er.source_attempt_id = a.id
+                        AND ABS(
+                          er.marks_obtained -
+                          COALESCE(a.total_score, 0)
+                        ) < 0.001
+                    )
+                ) AS missing_results
+            `;
+
+            db.query(
+              checkSql,
+              [examId, examId, examId],
+              (checkErr, checkRows) => {
+                if (checkErr) {
+                  console.error(
+                    'Grading verification:',
+                    checkErr
+                  );
+
+                  return fail(
+                    500,
+                    'Could not verify grading and result synchronization.',
+                    { error: checkErr.sqlMessage || checkErr.message }
+                  );
+                }
+
+                const counts = checkRows[0];
+
+                if (Number(counts.pending) > 0) {
+                  return fail(
+                    409,
+                    'Some exam attempts are incomplete or awaiting grading.'
+                  );
+                }
+
+                if (Number(counts.missing_results) > 0) {
+                  return fail(
+                    409,
+                    'Latest graded attempts are not synchronized with exam_results.'
+                  );
+                }
+
+                if (Number(counts.graded) === 0) {
+                  return fail(
+                    409,
+                    'No graded results are available to publish.'
+                  );
+                }
+
+                /* ========== CALCULATE GRADES ========== */
+
+                const gradeSql = `
+                  UPDATE exam_results er
+
+                  JOIN exams e
+                    ON e.id = er.exam_id
+
+                  SET er.grade = CASE
+
+                    WHEN er.marks_obtained /
+                         e.total_marks * 100 >= 90
+                      THEN 'A+'
+
+                    WHEN er.marks_obtained /
+                         e.total_marks * 100 >= 80
+                      THEN 'A'
+
+                    WHEN er.marks_obtained /
+                         e.total_marks * 100 >= 70
+                      THEN 'B'
+
+                    WHEN er.marks_obtained /
+                         e.total_marks * 100 >= 60
+                      THEN 'C'
+
+                    WHEN er.marks_obtained /
+                         e.total_marks * 100 >= 50
+                      THEN 'D'
+
+                    ELSE 'F'
+
+                  END
+
+                  WHERE er.exam_id = ?
+                    AND er.status = 'Graded'
+                    AND er.marks_obtained IS NOT NULL
+                    AND e.total_marks > 0
+                `;
+
+                db.query(
+                  gradeSql,
+                  [examId],
+                  (gradeErr) => {
+                    if (gradeErr) {
+                      console.error(
+                        'Grade calculation:',
+                        gradeErr
+                      );
+
+                      return fail(
+                        500,
+                        'Could not calculate grades.',
+                        { error: gradeErr.sqlMessage || gradeErr.message }
+                      );
+                    }
+
+                    /* ========== PUBLISH RESULTS ========== */
+
+                    const publishSql = `
+                      UPDATE exams
+                      SET result_published = 1
+                      WHERE id = ?
+                        AND result_published = 0
+                    `;
+
+                    db.query(
+                      publishSql,
+                      [examId],
+                      (publishErr, result) => {
+                        if (
+                          publishErr ||
+                          result.affectedRows !== 1
+                        ) {
+                          console.error(
+                            'Publish results:',
+                            publishErr
+                          );
+
+                          return fail(
+                            500,
+                            'Could not publish results.',
+                            { error: publishErr?.sqlMessage || publishErr?.message }
+                          );
+                        }
+
+                        return res.json({
+                          message:
+                            'Results published successfully.',
+                          exam_id: examId,
+                          published: true
+                        });
+                      }
+                    );
+                  }
+                );
+              }
+            );
+          }
+        );
+      }
+    );
   }
 );
 
