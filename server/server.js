@@ -941,6 +941,16 @@ const route = `${req.baseUrl}${req.path}`.replace(/^\/api(?=\/)/, "");
       }
     }
 
+    const instructorExamsList = route.match(
+      /^\/teacher\/exams\/(\d+)$/
+    );
+
+    if (method === "GET" && instructorExamsList) {
+      return ownId(instructorExamsList[1])
+        ? next()
+        : deny();
+    }
+
     // =============================================
     // ASSIGNMENT SECURITY
     // =============================================
