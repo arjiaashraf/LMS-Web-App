@@ -6491,8 +6491,6 @@ app.put(
     const rawMarks = req.body?.marks_awarded;
     const awarded = Number(rawMarks);
 
-    // ========== VALIDATE INPUT ==========
-
     if (
       !Number.isSafeInteger(attemptId) ||
       attemptId <= 0 ||
@@ -6510,8 +6508,6 @@ app.put(
         message: 'Invalid grading information.'
       });
     }
-
-    // ========== CALCULATE GRADE ==========
 
     const calculateExamGrade = (obtained, maximum) => {
 
@@ -6537,492 +6533,440 @@ app.put(
       return 'F';
     };
 
-    // ========== BEGIN TRANSACTION ==========
+    const fail = (code, message, extra = {}) => {
+      return res.status(code).json({ message, ...extra });
+    };
 
-    db.beginTransaction((beginErr) => {
+    const verifySql = `
+      SELECT
+        a.id,
+        a.exam_id,
+        a.student_id,
+        a.status,
 
-      if (beginErr) {
-        console.error('Grading transaction error:', beginErr);
+        e.result_published,
+        e.total_marks AS exam_total_marks,
 
-        return res.status(500).json({
-          message: 'Could not begin grading.'
-        });
-      }
+        q.marks AS question_marks,
 
-      const fail = (code, message) => {
-        db.rollback(() => {
-          return res.status(code).json({ message });
-        });
-      };
+        ans.id AS answer_id
 
-      // ========== VERIFY ANSWER AND OWNERSHIP ==========
+      FROM exam_attempts a
 
-      const verifySql = `
-        SELECT
-          a.id,
-          a.exam_id,
-          a.student_id,
-          a.status,
+      JOIN exams e
+        ON e.id = a.exam_id
 
-          e.result_published,
-          e.total_marks AS exam_total_marks,
+      JOIN exam_questions q
+        ON q.exam_id = a.exam_id
+       AND q.id = ?
+       AND q.question_type = 'ShortAnswer'
 
-          q.marks AS question_marks,
+      JOIN exam_answers ans
+        ON ans.attempt_id = a.id
+       AND ans.question_id = q.id
 
-          ans.id AS answer_id
+      WHERE a.id = ?
+        AND e.teacher_id = ?
 
-        FROM exam_attempts a
+        AND a.status IN (
+          'PendingReview',
+          'Graded'
+        )
 
-        JOIN exams e
-          ON e.id = a.exam_id
+        AND TRIM(
+          COALESCE(ans.answer_text, '')
+        ) <> ''
+      LIMIT 1
+    `;
 
-        JOIN exam_questions q
-          ON q.exam_id = a.exam_id
-         AND q.id = ?
-         AND q.question_type = 'ShortAnswer'
+    db.query(
+      verifySql,
+      [questionId, attemptId, teacherId],
+      (verifyErr, rows) => {
 
-        JOIN exam_answers ans
-          ON ans.attempt_id = a.id
-         AND ans.question_id = q.id
+        if (verifyErr) {
+          console.error('Verify answer error:', verifyErr);
 
-        WHERE a.id = ?
-          AND e.teacher_id = ?
+          return fail(
+            500,
+            'Failed to verify answer.',
+            { error: verifyErr.sqlMessage || verifyErr.message }
+          );
+        }
 
-          AND a.status IN (
-            'PendingReview',
-            'Graded'
-          )
+        if (!rows.length) {
+          return fail(
+            404,
+            'Reviewable short answer not found.'
+          );
+        }
 
-          AND TRIM(
-            COALESCE(ans.answer_text, '')
-          ) <> ''
+        const row = rows[0];
 
-        FOR UPDATE
-      `;
+        if (Number(row.result_published) === 1) {
+          return fail(
+            409,
+            'Published results cannot be changed here.'
+          );
+        }
 
-      db.query(
-        verifySql,
-        [questionId, attemptId, teacherId],
-        (verifyErr, rows) => {
+        if (awarded > Number(row.question_marks)) {
+          return fail(
+            400,
+            `Marks cannot exceed ${row.question_marks}.`
+          );
+        }
 
-          if (verifyErr) {
-            console.error('Verify answer error:', verifyErr);
+        const updateAnswerSql = `
+          UPDATE exam_answers
 
-            return fail(
-              500,
-              'Failed to verify answer.'
-            );
-          }
+          SET
+            marks_awarded = ?,
+            is_correct = NULL
 
-          if (!rows.length) {
-            return fail(
-              404,
-              'Reviewable short answer not found.'
-            );
-          }
+          WHERE id = ?
+        `;
 
-          const row = rows[0];
+        db.query(
+          updateAnswerSql,
+          [awarded, row.answer_id],
+          (answerErr) => {
 
-          // ========== BLOCK PUBLISHED RESULTS ==========
+            if (answerErr) {
+              console.error(
+                'Update answer marks error:',
+                answerErr
+              );
 
-          if (Number(row.result_published) === 1) {
-            return fail(
-              409,
-              'Published results cannot be changed here.'
-            );
-          }
+              return fail(
+                500,
+                'Failed to save answer marks.',
+                { error: answerErr.sqlMessage || answerErr.message }
+              );
+            }
 
-          // ========== VALIDATE QUESTION MARKS ==========
+            const sumSql = `
+              SELECT
 
-          if (awarded > Number(row.question_marks)) {
-            return fail(
-              400,
-              `Marks cannot exceed ${row.question_marks}.`
-            );
-          }
+                COALESCE(
+                  SUM(ans.marks_awarded),
+                  0
+                ) AS total_score,
 
-          // ========== UPDATE ANSWER MARKS ==========
+                COALESCE(
+                  SUM(
+                    CASE
+                      WHEN q.question_type = 'ShortAnswer'
+                       AND TRIM(
+                         COALESCE(ans.answer_text, '')
+                       ) <> ''
+                       AND ans.marks_awarded IS NULL
 
-          const updateAnswerSql = `
-            UPDATE exam_answers
+                      THEN 1
+                      ELSE 0
+                    END
+                  ),
+                  0
+                ) AS pending_count
 
-            SET
-              marks_awarded = ?,
-              is_correct = NULL
+              FROM exam_questions q
 
-            WHERE id = ?
-          `;
+              LEFT JOIN exam_answers ans
+                ON ans.question_id = q.id
+               AND ans.attempt_id = ?
 
-          db.query(
-            updateAnswerSql,
-            [awarded, row.answer_id],
-            (answerErr) => {
+              WHERE q.exam_id = ?
+            `;
 
-              if (answerErr) {
-                console.error(
-                  'Update answer marks error:',
-                  answerErr
-                );
+            db.query(
+              sumSql,
+              [attemptId, row.exam_id],
+              (sumErr, sumRows) => {
 
-                return fail(
-                  500,
-                  'Failed to save answer marks.'
-                );
-              }
-
-              // ========== RECALCULATE TOTAL SCORE ==========
-
-              const sumSql = `
-                SELECT
-
-                  COALESCE(
-                    SUM(ans.marks_awarded),
-                    0
-                  ) AS total_score,
-
-                  COALESCE(
-                    SUM(
-                      CASE
-                        WHEN q.question_type = 'ShortAnswer'
-                         AND TRIM(
-                           COALESCE(ans.answer_text, '')
-                         ) <> ''
-                         AND ans.marks_awarded IS NULL
-
-                        THEN 1
-                        ELSE 0
-                      END
-                    ),
-                    0
-                  ) AS pending_count
-
-                FROM exam_questions q
-
-                LEFT JOIN exam_answers ans
-                  ON ans.question_id = q.id
-                 AND ans.attempt_id = ?
-
-                WHERE q.exam_id = ?
-              `;
-
-              db.query(
-                sumSql,
-                [attemptId, row.exam_id],
-                (sumErr, sumRows) => {
-
-                  if (sumErr) {
-                    console.error(
-                      'Calculate total error:',
-                      sumErr
-                    );
-
-                    return fail(
-                      500,
-                      'Failed to calculate total marks.'
-                    );
-                  }
-
-                  const total = Number(
-                    sumRows[0]?.total_score || 0
+                if (sumErr) {
+                  console.error(
+                    'Calculate total error:',
+                    sumErr
                   );
 
-                  const pending = Number(
-                    sumRows[0]?.pending_count || 0
+                  return fail(
+                    500,
+                    'Failed to calculate total marks.',
+                    { error: sumErr.sqlMessage || sumErr.message }
                   );
+                }
 
-                  const status =
-                    pending === 0
-                      ? 'Graded'
-                      : 'PendingReview';
+                const total = Number(
+                  sumRows[0]?.total_score || 0
+                );
 
-                  // ========== CALCULATE FINAL GRADE ==========
+                const pending = Number(
+                  sumRows[0]?.pending_count || 0
+                );
 
-                  const grade =
-                    status === 'Graded'
-                      ? calculateExamGrade(
-                          total,
-                          row.exam_total_marks
-                        )
-                      : null;
+                const status =
+                  pending === 0
+                    ? 'Graded'
+                    : 'PendingReview';
 
-                  if (
-                    total > Number(row.exam_total_marks) ||
-                    (status === 'Graded' && grade === null)
-                  ) {
-                    return fail(
-                      400,
-                      'Invalid total score or exam marks.'
-                    );
-                  }
+                const grade =
+                  status === 'Graded'
+                    ? calculateExamGrade(
+                        total,
+                        row.exam_total_marks
+                      )
+                    : null;
 
-                  // ========== UPDATE EXAM ATTEMPT ==========
+                if (
+                  total > Number(row.exam_total_marks) ||
+                  (status === 'Graded' && grade === null)
+                ) {
+                  return fail(
+                    400,
+                    'Invalid total score or exam marks.'
+                  );
+                }
 
-                  const updateAttemptSql = `
-                    UPDATE exam_attempts
+                const updateAttemptSql = `
+                  UPDATE exam_attempts
 
-                    SET
-                      total_score = ?,
-                      status = ?
+                  SET
+                    total_score = ?,
+                    status = ?
 
-                    WHERE id = ?
-                  `;
+                  WHERE id = ?
+                `;
 
-                  db.query(
-                    updateAttemptSql,
-                    [total, status, attemptId],
-                    (attemptErr) => {
+                db.query(
+                  updateAttemptSql,
+                  [total, status, attemptId],
+                  (attemptErr) => {
 
-                      if (attemptErr) {
-                        console.error(
-                          'Update attempt error:',
-                          attemptErr
-                        );
+                    if (attemptErr) {
+                      console.error(
+                        'Update attempt error:',
+                        attemptErr
+                      );
 
-                        return fail(
-                          500,
-                          'Failed to update exam attempt.'
-                        );
-                      }
+                      return fail(
+                        500,
+                        'Failed to update exam attempt.',
+                        { error: attemptErr.sqlMessage || attemptErr.message }
+                      );
+                    }
 
-                      // ========== COMMIT HELPER ==========
+                    const respondSuccess = (
+                      syncedToResults = false
+                    ) => {
+                      return res.json({
+                        message:
+                          'Marks saved successfully.',
 
-                      const commitAndRespond = (
-                        syncedToResults = false
-                      ) => {
+                        attempt_id: attemptId,
+                        exam_id: row.exam_id,
+                        student_id: row.student_id,
 
-                        db.commit((commitErr) => {
+                        total_score: total,
+                        total_marks:
+                          Number(row.exam_total_marks),
 
-                          if (commitErr) {
-                            return db.rollback(() => {
-                              res.status(500).json({
-                                message:
-                                  'Failed to commit grading.'
-                              });
-                            });
-                          }
+                        grade,
+                        status,
 
-                          return res.json({
-                            message:
-                              'Marks saved successfully.',
+                        pending_short_answers: pending,
 
-                            attempt_id: attemptId,
-                            exam_id: row.exam_id,
-                            student_id: row.student_id,
+                        synced_to_results:
+                          syncedToResults,
 
-                            total_score: total,
-                            total_marks:
-                              Number(row.exam_total_marks),
+                        result_published: false
+                      });
+                    };
 
-                            grade,
-                            status,
+                    if (status !== 'Graded') {
+                      return respondSuccess(false);
+                    }
 
-                            pending_short_answers: pending,
+                    const latestAttemptSql = `
+                      SELECT
+                        id,
+                        attempt_number,
+                        status
 
-                            synced_to_results:
-                              syncedToResults,
+                      FROM exam_attempts
 
-                            result_published: false
-                          });
-                        });
-                      };
+                      WHERE exam_id = ?
+                        AND student_id = ?
 
-                      // ========== PENDING MANUAL REVIEW ==========
+                      ORDER BY
+                        attempt_number DESC,
+                        id DESC
 
-                      if (status !== 'Graded') {
-                        return commitAndRespond(false);
-                      }
+                      LIMIT 1
+                    `;
 
-                      // ========== CHECK LATEST ATTEMPT ==========
+                    db.query(
+                      latestAttemptSql,
+                      [row.exam_id, row.student_id],
+                      (latestErr, latestRows) => {
 
-                      const latestAttemptSql = `
-                        SELECT
-                          id,
-                          attempt_number,
-                          status
+                        if (latestErr) {
+                          console.error(
+                            'Latest attempt error:',
+                            latestErr
+                          );
 
-                        FROM exam_attempts
+                          return fail(
+                            500,
+                            'Failed to verify latest attempt.',
+                            { error: latestErr.sqlMessage || latestErr.message }
+                          );
+                        }
 
-                        WHERE exam_id = ?
-                          AND student_id = ?
+                        const latestAttempt =
+                          latestRows[0];
 
-                        ORDER BY
-                          attempt_number DESC,
-                          id DESC
+                        if (
+                          !latestAttempt ||
+                          Number(latestAttempt.id) !== attemptId
+                        ) {
+                          return respondSuccess(false);
+                        }
 
-                        LIMIT 1
-                      `;
+                        const findResultSql = `
+                          SELECT
+                            id,
+                            source_attempt_id
 
-                      db.query(
-                        latestAttemptSql,
-                        [row.exam_id, row.student_id],
-                        (latestErr, latestRows) => {
+                          FROM exam_results
 
-                          if (latestErr) {
-                            console.error(
-                              'Latest attempt error:',
-                              latestErr
-                            );
+                          WHERE exam_id = ?
+                            AND student_id = ?
 
-                            return fail(
-                              500,
-                              'Failed to verify latest attempt.'
-                            );
-                          }
+                          ORDER BY id DESC
 
-                          const latestAttempt =
-                            latestRows[0];
+                          LIMIT 1
+                        `;
 
-                          // Older attempts must never overwrite
-                          // a newer attempt's final result.
-                          if (
-                            !latestAttempt ||
-                            Number(latestAttempt.id) !== attemptId
-                          ) {
-                            return commitAndRespond(false);
-                          }
+                        db.query(
+                          findResultSql,
+                          [row.exam_id, row.student_id],
+                          (findErr, results) => {
 
-                          // ========== FIND EXISTING RESULT ==========
+                            if (findErr) {
+                              console.error(
+                                'Find result error:',
+                                findErr
+                              );
 
-                          const findResultSql = `
-                            SELECT
-                              id,
-                              source_attempt_id
+                              return fail(
+                                500,
+                                'Failed to check final result.',
+                                { error: findErr.sqlMessage || findErr.message }
+                              );
+                            }
 
-                            FROM exam_results
+                            const existingResult =
+                              results[0] || null;
 
-                            WHERE exam_id = ?
-                              AND student_id = ?
+                            if (existingResult) {
 
-                            ORDER BY id DESC
+                              const updateResultSql = `
+                                UPDATE exam_results
 
-                            LIMIT 1
+                                SET
+                                  marks_obtained = ?,
+                                  grade = ?,
+                                  status = 'Graded',
+                                  source_attempt_id = ?
 
-                            FOR UPDATE
-                          `;
-
-                          db.query(
-                            findResultSql,
-                            [row.exam_id, row.student_id],
-                            (findErr, results) => {
-
-                              if (findErr) {
-                                console.error(
-                                  'Find result error:',
-                                  findErr
-                                );
-
-                                return fail(
-                                  500,
-                                  'Failed to check final result.'
-                                );
-                              }
-
-                              const existingResult =
-                                results[0] || null;
-
-                              // ========== UPDATE EXISTING RESULT ==========
-
-                              if (existingResult) {
-
-                                const updateResultSql = `
-                                  UPDATE exam_results
-
-                                  SET
-                                    marks_obtained = ?,
-                                    grade = ?,
-                                    status = 'Graded',
-                                    source_attempt_id = ?
-
-                                  WHERE id = ?
-                                `;
-
-                                return db.query(
-                                  updateResultSql,
-                                  [
-                                    total,
-                                    grade,
-                                    attemptId,
-                                    existingResult.id
-                                  ],
-                                  (syncErr) => {
-
-                                    if (syncErr) {
-                                      console.error(
-                                        'Result sync error:',
-                                        syncErr
-                                      );
-
-                                      return fail(
-                                        500,
-                                        'Failed to update final result.'
-                                      );
-                                    }
-
-                                    return commitAndRespond(true);
-                                  }
-                                );
-                              }
-
-                              // ========== INSERT NEW RESULT ==========
-
-                              const insertResultSql = `
-                                INSERT INTO exam_results
-                                (
-                                  exam_id,
-                                  student_id,
-                                  marks_obtained,
-                                  grade,
-                                  status,
-                                  source_attempt_id
-                                )
-
-                                VALUES (
-                                  ?, ?, ?, ?, 'Graded', ?
-                                )
+                                WHERE id = ?
                               `;
 
-                              db.query(
-                                insertResultSql,
+                              return db.query(
+                                updateResultSql,
                                 [
-                                  row.exam_id,
-                                  row.student_id,
                                   total,
                                   grade,
-                                  attemptId
+                                  attemptId,
+                                  existingResult.id
                                 ],
-                                (insertErr) => {
+                                (syncErr) => {
 
-                                  if (insertErr) {
+                                  if (syncErr) {
                                     console.error(
-                                      'Insert result error:',
-                                      insertErr
+                                      'Result sync error:',
+                                      syncErr
                                     );
 
                                     return fail(
                                       500,
-                                      'Failed to create final result.'
+                                      'Failed to update final result.',
+                                      { error: syncErr.sqlMessage || syncErr.message }
                                     );
                                   }
 
-                                  return commitAndRespond(true);
+                                  return respondSuccess(true);
                                 }
                               );
                             }
-                          );
-                        }
-                      );
-                    }
-                  );
-                }
-              );
-            }
-          );
-        }
-      );
-    });
+
+                            const insertResultSql = `
+                              INSERT INTO exam_results
+                              (
+                                exam_id,
+                                student_id,
+                                marks_obtained,
+                                grade,
+                                status,
+                                source_attempt_id
+                              )
+
+                              VALUES (
+                                ?, ?, ?, ?, 'Graded', ?
+                              )
+                            `;
+
+                            db.query(
+                              insertResultSql,
+                              [
+                                row.exam_id,
+                                row.student_id,
+                                total,
+                                grade,
+                                attemptId
+                              ],
+                              (insertErr) => {
+
+                                if (insertErr) {
+                                  console.error(
+                                    'Insert result error:',
+                                    insertErr
+                                  );
+
+                                  return fail(
+                                    500,
+                                    'Failed to create final result.',
+                                    { error: insertErr.sqlMessage || insertErr.message }
+                                  );
+                                }
+
+                                return respondSuccess(true);
+                              }
+                            );
+                          }
+                        );
+                      }
+                    );
+                  }
+                );
+              }
+            );
+          }
+        );
+      }
+    );
   }
 );
-
        
 
 /* ========== INSTRUCTOR: SAVE OFFLINE EXAM RESULTS ========== */
