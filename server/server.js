@@ -9181,6 +9181,10 @@ app.get('/api/admin/exams-overview', (req, res) => {
    ADMIN — EXAM STUDENT RESULTS & ATTEMPTS (READ ONLY)
    ====================================================== */
 
+/* ======================================================
+   ADMIN — EXAM STUDENT RESULTS & ATTEMPTS (READ ONLY)
+   ====================================================== */
+
 app.get('/api/admin/exams/:examId/details', (req, res) => {
   const examId = Number(req.params.examId);
 
@@ -9220,7 +9224,8 @@ app.get('/api/admin/exams/:examId/details', (req, res) => {
       console.error('Admin exam details error:', examErr);
 
       return res.status(500).json({
-        message: 'Failed to load exam details.'
+        message: 'Failed to load exam details.',
+        error: examErr.sqlMessage || examErr.message
       });
     }
 
@@ -9256,7 +9261,7 @@ app.get('/api/admin/exams/:examId/details', (req, res) => {
           FROM exam_attempts ea2
           WHERE ea2.exam_id = ?
             AND ea2.student_id = u.id
-          ORDER BY ea2.id DESC
+          ORDER BY ea2.attempt_number DESC, ea2.id DESC
           LIMIT 1
         ) AS latest_attempt_status
 
@@ -9266,17 +9271,13 @@ app.get('/api/admin/exams/:examId/details', (req, res) => {
        AND u.role = 'student'
 
       LEFT JOIN exam_results er
-        ON er.id = (
-          SELECT MAX(er2.id)
-          FROM exam_results er2
-          WHERE er2.exam_id = ?
-            AND er2.student_id = u.id
-        )
+        ON er.exam_id = ?
+       AND er.student_id = u.id
 
       WHERE ce.course_batch_id = ?
         AND ce.status = 'Active'
 
-      ORDER BY u.name ASC, u.id ASC
+      ORDER BY u.name ASC, u.id ASC, er.id DESC
     `;
 
     db.query(
@@ -9290,28 +9291,83 @@ app.get('/api/admin/exams/:examId/details', (req, res) => {
           );
 
           return res.status(500).json({
-            message: 'Failed to load exam student results.'
+            message: 'Failed to load exam student results.',
+            error: studentErr.sqlMessage || studentErr.message
           });
         }
 
-        const formattedStudents = students.map(student => ({
-          ...student,
-          attempts_used: Number(student.attempts_used || 0),
-          marks_obtained:
-            student.marks_obtained === null
-              ? null
-              : Number(student.marks_obtained)
-        }));
+        const dedupedStudents = [];
+        const seenStudents = new Set();
 
-        return res.json({
-          exam,
-          students: formattedStudents
+        for (const student of students) {
+          if (!seenStudents.has(student.student_id)) {
+            seenStudents.add(student.student_id);
+            dedupedStudents.push(student);
+          }
+        }
+
+        const attemptsSql = `
+          SELECT
+            ea.id AS attempt_id,
+            ea.student_id,
+            u.name AS student_name,
+            ea.attempt_number,
+            ea.status,
+            ea.total_score,
+            DATE_FORMAT(ea.started_at, '%Y-%m-%d %H:%i:%s') AS started_at,
+            DATE_FORMAT(ea.submitted_at, '%Y-%m-%d %H:%i:%s') AS submitted_at,
+            DATE_FORMAT(ea.expires_at, '%Y-%m-%d %H:%i:%s') AS expires_at
+          FROM exam_attempts ea
+          JOIN users u ON u.id = ea.student_id
+          WHERE ea.exam_id = ?
+          ORDER BY ea.student_id ASC, ea.attempt_number ASC, ea.id ASC
+        `;
+
+        db.query(attemptsSql, [examId], (attErr, attempts) => {
+          if (attErr) {
+            console.error('Admin exam attempts error:', attErr);
+
+            return res.status(500).json({
+              message: 'Failed to load exam student results.',
+              error: attErr.sqlMessage || attErr.message
+            });
+          }
+
+          const attemptMap = new Map();
+
+          for (const attempt of attempts || []) {
+            const key = Number(attempt.student_id);
+            if (!attemptMap.has(key)) {
+              attemptMap.set(key, []);
+            }
+            attemptMap.get(key).push({
+              ...attempt,
+              total_score:
+                attempt.total_score == null
+                  ? null
+                  : Number(attempt.total_score)
+            });
+          }
+
+          const formattedStudents = dedupedStudents.map((student) => ({
+            ...student,
+            attempts_used: Number(student.attempts_used || 0),
+            marks_obtained:
+              student.marks_obtained === null || student.marks_obtained === undefined
+                ? null
+                : Number(student.marks_obtained),
+            attempts: attemptMap.get(Number(student.student_id)) || []
+          }));
+
+          return res.json({
+            exam,
+            students: formattedStudents
+          });
         });
       }
     );
   });
 });
-
 
 
 /* ============================================================
@@ -9850,8 +9906,8 @@ app.get(
 
       const exam = exams[0];
 
-      // Enrolled students and latest stored exam result
-      const students = await adminExamReportQuery(`
+      // Enrolled students and stored exam results
+      const rawStudents = await adminExamReportQuery(`
         SELECT
           u.id AS student_id,
           u.name AS student_name,
@@ -9872,28 +9928,25 @@ app.get(
          AND ce.status = 'Active'
 
         LEFT JOIN exam_results er
-          ON er.id = (
-            SELECT MAX(er2.id)
-            FROM exam_results er2
-            WHERE er2.exam_id = ?
-              AND er2.student_id = u.id
-          )
+          ON er.exam_id = ?
+         AND er.student_id = u.id
 
         WHERE ce.course_batch_id = ?
           AND u.role = 'student'
 
-        GROUP BY
-          u.id,
-          u.name,
-          u.email,
-          er.id,
-          er.marks_obtained,
-          er.grade,
-          er.feedback,
-          er.status
-
-        ORDER BY u.name ASC
+        ORDER BY u.name ASC, u.id ASC, er.id DESC
       `, [examId, exam.course_batch_id]);
+
+      const students = [];
+      const seenStudents = new Set();
+
+      for (const row of rawStudents || []) {
+        const key = Number(row.student_id);
+        if (!seenStudents.has(key)) {
+          seenStudents.add(key);
+          students.push(row);
+        }
+      }
 
       // Every recorded attempt, including retakes
       const attempts = await adminExamReportQuery(`
@@ -9933,7 +9986,7 @@ app.get(
 
       const attemptMap = new Map();
 
-      for (const attempt of attempts) {
+      for (const attempt of attempts || []) {
         const key = Number(attempt.student_id);
 
         if (!attemptMap.has(key)) {
@@ -9984,12 +10037,12 @@ app.get(
       );
 
       return res.status(500).json({
-        message: 'Failed to load full exam report.'
+        message: 'Failed to load full exam report.',
+        error: error.sqlMessage || error.message
       });
     }
   }
 );
-
 // START SERVER
 const PORT = process.env.PORT || 5000;
 
