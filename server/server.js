@@ -1091,12 +1091,12 @@ const route = `${req.baseUrl}${req.path}`.replace(/^\/api(?=\/)/, "");
         : deny();
     }
 
-    const deleteExamMatch = route.match(
+   const deleteExamRoute = route.match(
       /^\/teacher\/exams\/(\d+)$/
     );
 
-    if (deleteExamMatch && method === "DELETE") {
-      return (await examAccess(deleteExamMatch[1]))
+    if (deleteExamRoute && method === "DELETE") {
+      return (await examAccess(deleteExamRoute[1]))
         ? next()
         : deny();
     }
@@ -1285,6 +1285,20 @@ if (
 
   if (!allowed) return deny();
 
+  const deleteExamMatch =
+          method === "DELETE"
+            ? apiPath.match(/^\/api\/teacher\/exams\/(\d+)$/)
+            : null;
+
+        if (deleteExamMatch) {
+          const ownsExam =
+            await checkTeacherExamOwnership(
+              deleteExamMatch[1],
+              userId
+            );
+
+          if (!ownsExam) return deny();
+        }
   return next();
 }
 
