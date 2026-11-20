@@ -606,16 +606,21 @@ const checkTeacherExamOwnership = async (examId, teacherId) => {
   const rows = await authQuery(
     `SELECT e.id
      FROM exams e
-     JOIN course_batches cb ON cb.id = e.course_batch_id
-     LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
+     JOIN course_batches cb
+       ON cb.id = e.course_batch_id
+     LEFT JOIN courses c
+       ON c.id = cb.course_id
+     LEFT JOIN batch_instructors bi
+       ON bi.batch_id = cb.id
      WHERE e.id = ?
        AND (
          e.teacher_id = ?
          OR cb.instructor_id = ?
          OR bi.instructor_id = ?
+         OR c.proposed_by = ?
        )
      LIMIT 1`,
-    [examId, teacherId, teacherId, teacherId]
+    [examId, teacherId, teacherId, teacherId, teacherId]
   );
 
   return rows.length > 0;
@@ -787,26 +792,31 @@ const route = `${req.baseUrl}${req.path}`.replace(/^\/api(?=\/)/, "");
       return rows.length > 0;
     };
 
-   const examAccess = async (examId) => {
-  if (!validId(examId)) return false;
+ const examAccess = async (examId) => {
+      if (!validId(examId)) return false;
 
-  const rows = await authQuery(
-    `SELECT e.id
-     FROM exams e
-     JOIN course_batches cb ON cb.id = e.course_batch_id
-     LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
-     WHERE e.id = ?
-       AND (
-         e.teacher_id = ?
-         OR cb.instructor_id = ?
-         OR bi.instructor_id = ?
-       )
-     LIMIT 1`,
-    [examId, teacherId, teacherId, teacherId]
-  );
+      const rows = await authQuery(
+        `SELECT e.id
+         FROM exams e
+         JOIN course_batches cb
+           ON cb.id = e.course_batch_id
+         LEFT JOIN courses c
+           ON c.id = cb.course_id
+         LEFT JOIN batch_instructors bi
+           ON bi.batch_id = cb.id
+         WHERE e.id = ?
+           AND (
+             e.teacher_id = ?
+             OR cb.instructor_id = ?
+             OR bi.instructor_id = ?
+             OR c.proposed_by = ?
+           )
+         LIMIT 1`,
+        [examId, teacherId, teacherId, teacherId, teacherId]
+      );
 
-  return rows.length > 0;
-};
+      return rows.length > 0;
+    };
 
     const attemptAccess = async (attemptId) => {
       if (!validId(attemptId)) return false;
@@ -8262,6 +8272,155 @@ app.put(
   }
 );
 
+
+// ========== INSTRUCTOR - DELETE EXAM & RELATED DATA ==========
+
+app.delete('/api/teacher/exams/:examId', (req, res) => {
+  const examId = Number(req.params.examId);
+  const teacherId = Number(req.body?.teacher_id || req.query?.teacher_id || req.user?.id);
+
+  if (!Number.isSafeInteger(examId) || examId <= 0) {
+    return res.status(400).json({
+      message: 'Invalid exam ID.'
+    });
+  }
+
+  const verifySql = `
+    SELECT e.id
+    FROM exams e
+    JOIN course_batches cb
+      ON cb.id = e.course_batch_id
+    LEFT JOIN batch_instructors bi
+      ON bi.batch_id = cb.id
+    WHERE e.id = ?
+      ${
+        Number.isSafeInteger(teacherId) && teacherId > 0
+          ? `AND (
+               e.teacher_id = ?
+               OR cb.instructor_id = ?
+               OR bi.instructor_id = ?
+             )`
+          : ''
+      }
+    LIMIT 1
+  `;
+
+  const verifyParams =
+    Number.isSafeInteger(teacherId) && teacherId > 0
+      ? [examId, teacherId, teacherId, teacherId]
+      : [examId];
+
+  db.query(verifySql, verifyParams, (verifyErr, rows) => {
+    if (verifyErr) {
+      console.error('Delete exam verification error:', verifyErr);
+      return res.status(500).json({
+        message: 'Failed to verify exam.',
+        error: verifyErr.sqlMessage || verifyErr.message
+      });
+    }
+
+    if (!rows.length) {
+      return res.status(403).json({
+        message: 'Exam not found or access denied.'
+      });
+    }
+
+    // Delete child records first (answers -> attempts -> results -> extensions -> questions -> exam)
+    const deleteAnswersSql = `
+      DELETE ans
+      FROM exam_answers ans
+      JOIN exam_attempts att
+        ON att.id = ans.attempt_id
+      WHERE att.exam_id = ?
+    `;
+
+    db.query(deleteAnswersSql, [examId], (ansErr) => {
+      if (ansErr) {
+        console.error('Delete exam answers error:', ansErr);
+        return res.status(500).json({
+          message: 'Failed to delete exam answers.',
+          error: ansErr.sqlMessage || ansErr.message
+        });
+      }
+
+      db.query(
+        'DELETE FROM exam_attempts WHERE exam_id = ?',
+        [examId],
+        (attErr) => {
+          if (attErr) {
+            console.error('Delete exam attempts error:', attErr);
+            return res.status(500).json({
+              message: 'Failed to delete exam attempts.',
+              error: attErr.sqlMessage || attErr.message
+            });
+          }
+
+          db.query(
+            'DELETE FROM exam_results WHERE exam_id = ?',
+            [examId],
+            (resErr) => {
+              if (resErr) {
+                console.error('Delete exam results error:', resErr);
+                return res.status(500).json({
+                  message: 'Failed to delete exam results.',
+                  error: resErr.sqlMessage || resErr.message
+                });
+              }
+
+              db.query(
+                'DELETE FROM student_exam_extensions WHERE exam_id = ?',
+                [examId],
+                (extErr) => {
+                  if (extErr) {
+                    console.error('Delete exam extensions error:', extErr);
+                    return res.status(500).json({
+                      message: 'Failed to delete exam extensions.',
+                      error: extErr.sqlMessage || extErr.message
+                    });
+                  }
+
+                  db.query(
+                    'DELETE FROM exam_questions WHERE exam_id = ?',
+                    [examId],
+                    (qErr) => {
+                      if (qErr) {
+                        console.error('Delete exam questions error:', qErr);
+                        return res.status(500).json({
+                          message: 'Failed to delete exam questions.',
+                          error: qErr.sqlMessage || qErr.message
+                        });
+                      }
+
+                      db.query(
+                        'DELETE FROM exams WHERE id = ?',
+                        [examId],
+                        (examDelErr, delResult) => {
+                          if (examDelErr || delResult.affectedRows !== 1) {
+                            console.error('Delete exam error:', examDelErr);
+                            return res.status(500).json({
+                              message: 'Failed to delete exam.',
+                              error: examDelErr?.sqlMessage || examDelErr?.message
+                            });
+                          }
+
+                          return res.json({
+                            message: 'Exam and all related submissions, marks, and records deleted successfully.',
+                            exam_id: examId,
+                            deleted: true
+                          });
+                        }
+                      );
+                    }
+                  );
+                }
+              );
+            }
+          );
+        }
+      );
+    });
+  });
+});
 /* =====================================================
    3. STUDENT — START OR RESUME EXAM WITH EXTENSION
    Replaces the previous Start Exam route.
