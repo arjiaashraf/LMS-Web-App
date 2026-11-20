@@ -1268,41 +1268,25 @@ const campus95SecurityGate = async (req, res, next) => {
           message: "Access denied."
         });
 
-      
-// Instructor may view students only in assigned batches.
-const attendanceRosterMatch = apiPath.match(
-  /^\/api\/admin\/class-batch-students\/(\d+)$/
-);
+      // Instructor may view students only in assigned batches.
+      const attendanceRosterMatch = apiPath.match(
+        /^\/api\/admin\/class-batch-students\/(\d+)$/
+      );
 
-if (
-  method === "GET" &&
-  attendanceRosterMatch &&
-  role === "instructor"
-) {
-  const allowed = await checkTeacherBatchAccess(
-    attendanceRosterMatch[1],
-    userId
-  );
+      if (
+        method === "GET" &&
+        attendanceRosterMatch &&
+        role === "instructor"
+      ) {
+        const allowed = await checkTeacherBatchAccess(
+          attendanceRosterMatch[1],
+          userId
+        );
 
-  if (!allowed) return deny();
+        if (!allowed) return deny();
 
-  const deleteExamMatch =
-          method === "DELETE"
-            ? apiPath.match(/^\/api\/teacher\/exams\/(\d+)$/)
-            : null;
-
-        if (deleteExamMatch) {
-          const ownsExam =
-            await checkTeacherExamOwnership(
-              deleteExamMatch[1],
-              userId
-            );
-
-          if (!ownsExam) return deny();
-        }
-  return next();
-}
-
+        return next();
+      }
 
       // ========== ADMIN ROUTES ==========
 
@@ -1353,8 +1337,6 @@ if (
         }
 
         // Student ID inside JSON or multipart form data.
-        // Multipart is parsed later by multer, so enrollment
-        // ownership must ALSO be checked inside that handler.
         const bodyStudentId =
           req.body?.student_id ?? req.body?.studentId;
 
@@ -1395,6 +1377,22 @@ if (
           if (!enrolled) return deny();
         }
 
+        return next();
+      }
+
+      // ========== INSTRUCTOR ROUTES ==========
+
+      if (
+        apiPath.startsWith("/api/teacher/") ||
+        apiPath.startsWith("/api/instructor/")
+      ) {
+        if (role !== "instructor" && role !== "admin") {
+          return deny();
+        }
+
+        if (role === "admin") return next();
+
+        // Delete exam ownership check (parameter is examId, not teacherId).
         const deleteExamMatch =
           method === "DELETE"
             ? apiPath.match(/^\/api\/teacher\/exams\/(\d+)$/)
@@ -1408,24 +1406,8 @@ if (
             );
 
           if (!ownsExam) return deny();
+          return next();
         }
-
-        return next();
-      }
-
-      
-
-      // ========== INSTRUCTOR ROUTES ==========
-
-      if (
-        apiPath.startsWith("/api/teacher/") ||
-        apiPath.startsWith("/api/instructor/")
-      ) {
-        if (role !== "instructor" && role !== "admin") {
-          return deny();
-        }
-
-        if (role === "admin") return next();
 
         // Match URL parameters that identify the instructor.
         const teacherIdPatterns = [
@@ -5011,6 +4993,8 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'Online', 1, 0)
 
 // ========== INSTRUCTOR - GET CREATED EXAMS ==========
 
+// ========== INSTRUCTOR - GET CREATED EXAMS ==========
+
 app.get('/api/teacher/exams/:teacherId', (req, res) => {
   const teacherId = Number(req.params.teacherId);
   const page = Number(req.query.page || 1);
@@ -5026,11 +5010,10 @@ app.get('/api/teacher/exams/:teacherId', (req, res) => {
     });
   }
 
-  // TODO: Add JWT authentication and instructor authorization.
   const offset = (page - 1) * limit;
 
   const query = `
-    SELECT
+    SELECT DISTINCT
       e.id,
       e.course_id,
       e.course_batch_id,
@@ -5049,15 +5032,20 @@ app.get('/api/teacher/exams/:teacherId', (req, res) => {
     FROM exams e
     JOIN courses c ON c.id = e.course_id
     JOIN course_batches cb ON cb.id = e.course_batch_id
-    WHERE e.teacher_id = ?
-      AND cb.instructor_id = ?
+    LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
+    WHERE (
+      e.teacher_id = ?
+      OR cb.instructor_id = ?
+      OR bi.instructor_id = ?
+      OR c.proposed_by = ?
+    )
     ORDER BY e.exam_date DESC, e.id DESC
     LIMIT ? OFFSET ?
   `;
 
   db.query(
     query,
-    [teacherId, teacherId, limit, offset],
+    [teacherId, teacherId, teacherId, teacherId, limit, offset],
     (err, results) => {
       if (err) {
         console.error('Get instructor exams error:', err);
@@ -5066,12 +5054,10 @@ app.get('/api/teacher/exams/:teacherId', (req, res) => {
         });
       }
 
-      // Current InstructorExams.tsx expects an array.
       res.json(results);
     }
   );
 });
-
 
 // ========== INSTRUCTOR - GET EXAM STUDENTS & RESULTS ==========
 
@@ -8305,6 +8291,8 @@ app.delete('/api/teacher/exams/:examId', (req, res) => {
     FROM exams e
     JOIN course_batches cb
       ON cb.id = e.course_batch_id
+    LEFT JOIN courses c
+      ON c.id = cb.course_id
     LEFT JOIN batch_instructors bi
       ON bi.batch_id = cb.id
     WHERE e.id = ?
@@ -8314,6 +8302,7 @@ app.delete('/api/teacher/exams/:examId', (req, res) => {
                e.teacher_id = ?
                OR cb.instructor_id = ?
                OR bi.instructor_id = ?
+               OR c.proposed_by = ?
              )`
           : ''
       }
@@ -8322,7 +8311,7 @@ app.delete('/api/teacher/exams/:examId', (req, res) => {
 
   const verifyParams =
     Number.isSafeInteger(teacherId) && teacherId > 0
-      ? [examId, teacherId, teacherId, teacherId]
+      ? [examId, teacherId, teacherId, teacherId, teacherId]
       : [examId];
 
   db.query(verifySql, verifyParams, (verifyErr, rows) => {
