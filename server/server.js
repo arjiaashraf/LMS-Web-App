@@ -787,26 +787,26 @@ const route = `${req.baseUrl}${req.path}`.replace(/^\/api(?=\/)/, "");
       return rows.length > 0;
     };
 
-    const examAccess = async (examId) => {
-      if (!validId(examId)) return false;
+   const examAccess = async (examId) => {
+  if (!validId(examId)) return false;
 
-      const rows = await authQuery(
-        `SELECT e.id
-         FROM exams e
-         JOIN course_batches cb ON cb.id = e.course_batch_id
-         LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
-         WHERE e.id = ?
-           AND (
-             e.teacher_id = ?
-             OR cb.instructor_id = ?
-             OR bi.instructor_id = ?
-           )
-         LIMIT 1`,
-        [examId, teacherId, teacherId, teacherId]
-      );
+  const rows = await authQuery(
+    `SELECT e.id
+     FROM exams e
+     JOIN course_batches cb ON cb.id = e.course_batch_id
+     LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
+     WHERE e.id = ?
+       AND (
+         e.teacher_id = ?
+         OR cb.instructor_id = ?
+         OR bi.instructor_id = ?
+       )
+     LIMIT 1`,
+    [examId, teacherId, teacherId, teacherId]
+  );
 
-      return rows.length > 0;
-    };
+  return rows.length > 0;
+};
 
     const attemptAccess = async (attemptId) => {
       if (!validId(attemptId)) return false;
@@ -8186,7 +8186,7 @@ app.put(
   async (req, res) => {
     const examId = Number(req.params.examId);
     const studentId = Number(req.params.studentId);
-    const teacherId = Number(req.body?.teacher_id);
+    const teacherId = Number(req.body?.teacher_id || req.user?.id);
 
     const startAt = req.body?.start_at;
     const endAt = req.body?.end_at;
@@ -8217,24 +8217,24 @@ app.put(
       transactionStarted = true;
 
      const exams = await examExtensionQuery(
-        `SELECT
-           e.id,
-           e.exam_mode,
-           e.exam_status,
-           e.result_published,
-           e.course_batch_id
-         FROM exams e
-         JOIN course_batches cb ON cb.id = e.course_batch_id
-         LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
-         WHERE e.id = ?
-           AND (
-             e.teacher_id = ?
-             OR cb.instructor_id = ?
-             OR bi.instructor_id = ?
-           )
-         LIMIT 1`,
-        [examId, teacherId, teacherId, teacherId]
-      );
+  `SELECT
+     e.id,
+     e.exam_mode,
+     e.exam_status,
+     e.result_published,
+     e.course_batch_id
+   FROM exams e
+   JOIN course_batches cb ON cb.id = e.course_batch_id
+   LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
+   WHERE e.id = ?
+     AND (
+       e.teacher_id = ?
+       OR cb.instructor_id = ?
+       OR bi.instructor_id = ?
+     )
+   LIMIT 1`,
+  [examId, teacherId, teacherId, teacherId]
+);
 
       if (!exams.length) {
         await examExtensionRollback();
