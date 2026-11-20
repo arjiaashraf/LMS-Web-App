@@ -1,7 +1,6 @@
-
 import {
   LayoutDashboard, Users, GraduationCap, BookOpen,
-  ClipboardList, CalendarCheck, FileText, Settings,
+  ClipboardList, CalendarCheck, FileText,
   LogOut, Menu, Video, BarChart3, X, CheckCircle
 } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
@@ -33,8 +32,7 @@ const navigation = [
   { name: "Attendance", path: "/attendance", icon: CalendarCheck },
   { name: "Exams & Results", path: "/exams", icon: FileText },
   { name: "Online Classes", path: "/announcements", icon: Video },
-  { name: "Reports", path: "/reports", icon: BarChart3 },
-  { name: "Settings", path: "/settings", icon: Settings }
+  { name: "Reports", path: "/reports", icon: BarChart3 }
 ];
 
 function AdminDashboard() {

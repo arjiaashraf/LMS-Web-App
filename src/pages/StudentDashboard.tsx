@@ -1,7 +1,6 @@
-
 import {
   BookOpen, ClipboardList, CalendarCheck, Award,
-  Clock3, User, Settings, LogOut, GraduationCap,
+  Clock3, User, LogOut, GraduationCap,
   ChevronRight, Video, Bell, Menu, X
 } from "lucide-react";
 
@@ -93,11 +92,6 @@ const studentNavigation = [
     name: "Profile",
     path: "/student-profile",
     icon: User
-  },
-  {
-    name: "Settings",
-    path: "/student-settings",
-    icon: Settings
   }
 ];
 

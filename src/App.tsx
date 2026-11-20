@@ -1,4 +1,3 @@
-
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 
 // ================= ADMIN PAGES =================
@@ -10,7 +9,6 @@ import Teachers from "./pages/Teachers";
 import Assignments from "./pages/Assignments";
 import Attendance from "./pages/Attendance";
 import AdminExams from "./pages/AdminExams";
-import Settings from "./pages/Settings";
 import OnlineClasses from "./pages/OnlineClass";
 import Reports from "./pages/Reports";
 import VerifyEmail from "./pages/VerifyEmail";
@@ -37,7 +35,6 @@ import StudentAttendance from "./pages/StudentAttendance";
 import StudentResults from "./pages/StudentResults";
 import StudentAnnouncements from "./pages/StudentAnnouncements";
 import StudentProfile from "./pages/StudentProfile";
-import StudentSettings from "./pages/StudentSettings";
 import StudentOnlineClasses from "./pages/StudentOnlineClasses";
 import StudentExamAttempt from "./pages/StudentExamAttempt";
 
@@ -113,11 +110,6 @@ function App() {
           element={<OnlineClasses />}
         />
 
-        <Route
-          path="/settings"
-          element={<Settings />}
-        />
-
         <Route path="/reports" element={<Reports />} />
 
         {/* ========== INSTRUCTOR ROUTES ========== */}
@@ -187,11 +179,6 @@ function App() {
         <Route
           path="/student-profile"
           element={<StudentProfile />}
-        />
-
-        <Route
-          path="/student-settings"
-          element={<StudentSettings />}
         />
 
         {/* STUDENT ONLINE EXAM ATTEMPT */}
