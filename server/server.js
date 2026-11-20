@@ -6113,232 +6113,209 @@ app.post('/api/student/exam-attempts/:attemptId/submit', (req, res) => {
     });
   }
 
-  db.beginTransaction((beginErr) => {
-    if (beginErr) {
-      console.error('Begin submit transaction:', beginErr);
+  const attemptSql = `
+    SELECT
+      a.id,
+      a.exam_id,
+      a.student_id,
+      a.status,
+      a.total_score,
+      e.total_marks,
+      e.exam_mode,
+      e.exam_status
+    FROM exam_attempts a
+    JOIN exams e
+      ON e.id = a.exam_id
+    JOIN course_enrollments ce
+      ON ce.student_id = a.student_id
+     AND ce.course_batch_id = e.course_batch_id
+     AND ce.status = 'Active'
+    WHERE a.id = ?
+      AND a.student_id = ?
+    LIMIT 1
+  `;
+
+  db.query(attemptSql, [attemptId, studentId], (err, rows) => {
+    if (err) {
+      console.error('Submission verification:', err);
       return res.status(500).json({
-        message: 'Could not begin submission.'
+        message: 'Failed to verify exam attempt.'
       });
     }
 
-    const rollback = (status, message) => {
-      db.rollback(() => {
-        res.status(status).json({ message });
+    if (rows.length !== 1) {
+      return res.status(403).json({
+        message: 'Attempt not found or access denied.'
       });
-    };
+    }
 
-    const attemptSql = `
+    const attempt = rows[0];
+
+    if (attempt.status !== 'InProgress') {
+      return res.json({
+        message: 'Exam was already submitted.',
+        attempt_id: attemptId,
+        status: attempt.status,
+        objective_score: Number(attempt.total_score || 0),
+        already_submitted: true
+      });
+    }
+
+    if (
+      attempt.exam_mode !== 'Online' ||
+      attempt.exam_status !== 'Published'
+    ) {
+      return res.status(409).json({
+        message: 'This attempt cannot be submitted.'
+      });
+    }
+
+    const answersSql = `
       SELECT
-        a.id,
-        a.exam_id,
-        a.student_id,
-        a.status,
-        a.total_score,
-        e.total_marks,
-        e.exam_mode,
-        e.exam_status
-      FROM exam_attempts a
-      JOIN exams e
-        ON e.id = a.exam_id
-      JOIN course_enrollments ce
-        ON ce.student_id = a.student_id
-       AND ce.course_batch_id = e.course_batch_id
-       AND ce.status = 'Active'
-      WHERE a.id = ?
-        AND a.student_id = ?
-      FOR UPDATE
+        q.id AS question_id,
+        q.question_type,
+        q.correct_answer,
+        q.marks,
+        ans.id AS answer_id,
+        ans.answer_text
+      FROM exam_questions q
+      LEFT JOIN exam_answers ans
+        ON ans.question_id = q.id
+       AND ans.attempt_id = ?
+      WHERE q.exam_id = ?
+      ORDER BY q.id
     `;
 
-    db.query(attemptSql, [attemptId, studentId], (err, rows) => {
-      if (err) {
-        console.error('Submission verification:', err);
-        return rollback(500, 'Failed to verify exam attempt.');
-      }
+    db.query(
+      answersSql,
+      [attemptId, attempt.exam_id],
+      (qErr, questions) => {
+        if (qErr) {
+          console.error('Submission question load:', qErr);
+          return res.status(500).json({
+            message: 'Could not load answers for grading.'
+          });
+        }
 
-      if (rows.length !== 1) {
-        return rollback(403, 'Attempt not found or access denied.');
-      }
+        if (!questions.length) {
+          return res.status(409).json({
+            message: 'Exam has no questions.'
+          });
+        }
 
-      const attempt = rows[0];
+        let score = 0;
+        let pendingManualReview = false;
 
-      if (attempt.status !== 'InProgress') {
-        return db.commit((commitErr) => {
-          if (commitErr) {
+        const objectiveUpdates = [];
+
+        for (const question of questions) {
+          const answer = String(
+            question.answer_text ?? ''
+          ).trim();
+
+          if (question.question_type === 'ShortAnswer') {
+            if (answer.length > 0) {
+              pendingManualReview = true;
+            }
+            continue;
+          }
+
+          if (
+            !['MCQ', 'TrueFalse'].includes(question.question_type)
+          ) {
             return res.status(500).json({
-              message: 'Failed to finish request.'
+              message: 'Unknown question type in exam.'
             });
           }
 
-          return res.json({
-            message: 'Exam was already submitted.',
-            attempt_id: attemptId,
-            status: attempt.status,
-            objective_score: Number(attempt.total_score || 0),
-            already_submitted: true
-          });
-        });
-      }
-
-      if (
-        attempt.exam_mode !== 'Online' ||
-        attempt.exam_status !== 'Published'
-      ) {
-        return rollback(409, 'This attempt cannot be submitted.');
-      }
-
-      const answersSql = `
-        SELECT
-          q.id AS question_id,
-          q.question_type,
-          q.correct_answer,
-          q.marks,
-          ans.id AS answer_id,
-          ans.answer_text
-        FROM exam_questions q
-        LEFT JOIN exam_answers ans
-          ON ans.question_id = q.id
-         AND ans.attempt_id = ?
-        WHERE q.exam_id = ?
-        ORDER BY q.id
-      `;
-
-      db.query(
-        answersSql,
-        [attemptId, attempt.exam_id],
-        (qErr, questions) => {
-          if (qErr) {
-            console.error('Submission question load:', qErr);
-            return rollback(500, 'Could not load answers for grading.');
-          }
-
-          if (!questions.length) {
-            return rollback(409, 'Exam has no questions.');
-          }
-
-          let score = 0;
-          let pendingManualReview = false;
-
-          const objectiveUpdates = [];
-
-          for (const question of questions) {
-            const answer = String(
-              question.answer_text ?? ''
+          const correct =
+            answer.length > 0 &&
+            answer === String(
+              question.correct_answer ?? ''
             ).trim();
 
-            if (question.question_type === 'ShortAnswer') {
-              if (answer.length > 0) {
-                pendingManualReview = true;
-              }
-              continue;
-            }
+          const awarded = correct ? Number(question.marks) : 0;
 
-            if (
-              !['MCQ', 'TrueFalse'].includes(question.question_type)
-            ) {
-              return rollback(500, 'Unknown question type in exam.');
-            }
+          score += awarded;
 
-            const correct =
-              answer.length > 0 &&
-              answer === String(
-                question.correct_answer ?? ''
-              ).trim();
-
-            const awarded = correct ? Number(question.marks) : 0;
-
-            score += awarded;
-
-            if (question.answer_id !== null) {
-              objectiveUpdates.push([
-                awarded,
-                correct ? 1 : 0,
-                question.answer_id
-              ]);
-            }
+          if (question.answer_id !== null) {
+            objectiveUpdates.push([
+              awarded,
+              correct ? 1 : 0,
+              question.answer_id
+            ]);
           }
+        }
 
-          const finalStatus = pendingManualReview
-            ? 'PendingReview'
-            : 'Graded';
+        const finalStatus = pendingManualReview
+          ? 'PendingReview'
+          : 'Graded';
 
-          const finishAttempt = () => {
-            db.query(
-              `UPDATE exam_attempts
-               SET status = ?,
-                   submitted_at = NOW(),
-                   total_score = ?
-               WHERE id = ?
-                 AND status = 'InProgress'`,
-              [
-                finalStatus,
-                Number(score.toFixed(2)),
-                attemptId
-              ],
-              (finishErr, result) => {
-                if (finishErr || result.affectedRows !== 1) {
-                  console.error(
-                    'Attempt finalize error:',
-                    finishErr
-                  );
-                  return rollback(500, 'Could not finalize exam.');
-                }
-
-                db.commit((commitErr) => {
-                  if (commitErr) {
-                    console.error('Commit exam error:', commitErr);
-
-                    return db.rollback(() => {
-                      res.status(500).json({
-                        message: 'Could not commit submission.'
-                      });
-                    });
-                  }
-
-                  return res.json({
-                    message: pendingManualReview
-                      ? 'Exam submitted. Short answers await instructor review.'
-                      : 'Exam submitted and objective questions graded.',
-                    attempt_id: attemptId,
-                    status: finalStatus,
-                    objective_score: Number(score.toFixed(2)),
-                    total_marks: Number(attempt.total_marks),
-                    already_submitted: false
-                  });
+        const finishAttempt = () => {
+          db.query(
+            `UPDATE exam_attempts
+             SET status = ?,
+                 submitted_at = NOW(),
+                 total_score = ?
+             WHERE id = ?
+               AND status = 'InProgress'`,
+            [
+              finalStatus,
+              Number(score.toFixed(2)),
+              attemptId
+            ],
+            (finishErr, result) => {
+              if (finishErr || result.affectedRows !== 1) {
+                console.error(
+                  'Attempt finalize error:',
+                  finishErr
+                );
+                return res.status(500).json({
+                  message: 'Could not finalize exam.'
                 });
               }
-            );
-          };
 
-          const updateOne = (idx) => {
-            if (idx >= objectiveUpdates.length) {
-              return finishAttempt();
+              return res.json({
+                message: pendingManualReview
+                  ? 'Exam submitted. Short answers await instructor review.'
+                  : 'Exam submitted and objective questions graded.',
+                attempt_id: attemptId,
+                status: finalStatus,
+                objective_score: Number(score.toFixed(2)),
+                total_marks: Number(attempt.total_marks),
+                already_submitted: false
+              });
             }
+          );
+        };
 
-            db.query(
-              `UPDATE exam_answers
-               SET marks_awarded = ?,
-                   is_correct = ?
-               WHERE id = ?`,
-              objectiveUpdates[idx],
-              (updateErr) => {
-                if (updateErr) {
-                  console.error('Answer grading error:', updateErr);
+        const updateOne = (idx) => {
+          if (idx >= objectiveUpdates.length) {
+            return finishAttempt();
+          }
 
-                  return rollback(
-                    500,
-                    'Could not grade exam answers.'
-                  );
-                }
-
-                updateOne(idx + 1);
+          db.query(
+            `UPDATE exam_answers
+             SET marks_awarded = ?,
+                 is_correct = ?
+             WHERE id = ?`,
+            objectiveUpdates[idx],
+            (updateErr) => {
+              if (updateErr) {
+                console.error('Answer grading error:', updateErr);
+                return res.status(500).json({
+                  message: 'Could not grade exam answers.'
+                });
               }
-            );
-          };
 
-          updateOne(0);
-        }
-      );
-    });
+              updateOne(idx + 1);
+            }
+          );
+        };
+
+        updateOne(0);
+      }
+    );
   });
 });
 
