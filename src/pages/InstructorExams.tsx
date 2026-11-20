@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from "react";
 import type { FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
@@ -17,6 +16,7 @@ import {
   AlertCircle,
   Settings,
   Send,
+  Trash2,
 } from "lucide-react";
 
 
@@ -188,6 +188,8 @@ function InstructorExams({ onBack }: InstructorExamsProps) {
 
   const [publishingExamId, setPublishingExamId] =
     useState<number | null>(null);
+  const [deletingExamId, setDeletingExamId] =
+    useState<number | null>(null);
 
   const [assignmentMarks, setAssignmentMarks] =
   useState<AssignmentMark[]>([]);
@@ -301,6 +303,71 @@ const [assignmentMarksError, setAssignmentMarksError] =
       );
     } finally {
       setCreatingExam(false);
+    }
+  };
+
+  // ========== DELETE EXAM ==========
+
+  const handleDeleteExam = async (exam: Exam) => {
+    if (deletingExamId !== null) return;
+
+    const confirmed = window.confirm(
+      `Delete "${exam.title}"?\n\n` +
+      "This will permanently delete the exam along with its questions, student attempts, submissions, marks, and extensions."
+    );
+
+    if (!confirmed) return;
+
+    setDeletingExamId(exam.id);
+
+    try {
+      const response = await fetch(
+        `/api/teacher/exams/${exam.id}`,
+        {
+          method: "DELETE",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            teacher_id: teacherId,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.message || "Failed to delete exam."
+        );
+      }
+
+      if (selectedExam?.id === exam.id) {
+        setSelectedExam(null);
+      }
+      if (questionExam?.id === exam.id) {
+        setQuestionExam(null);
+      }
+      if (settingsExam?.id === exam.id) {
+        setSettingsExam(null);
+      }
+      if (rescheduleExam?.id === exam.id) {
+        setRescheduleExam(null);
+      }
+
+      await fetchInstructorExams();
+      alert(
+        data.message ||
+        "Exam and all related submissions and marks deleted successfully."
+      );
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Failed to delete exam."
+      );
+    } finally {
+      setDeletingExamId(null);
     }
   };
   
@@ -1124,6 +1191,20 @@ const fetchAssignmentMarks = async (batchId?: number) => {
     Manage Extensions / Retakes
   </button>
 )}
+
+                  {/* DELETE EXAM */}
+
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteExam(exam)}
+                    disabled={deletingExamId !== null}
+                    className="w-full bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 disabled:opacity-50 py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2"
+                  >
+                    <Trash2 size={17} />
+                    {deletingExamId === exam.id
+                      ? "Deleting..."
+                      : "Delete Exam"}
+                  </button>
 
 
                 </div>

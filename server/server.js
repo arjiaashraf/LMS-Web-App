@@ -1081,6 +1081,16 @@ const route = `${req.baseUrl}${req.path}`.replace(/^\/api(?=\/)/, "");
         : deny();
     }
 
+    const deleteExamMatch = route.match(
+      /^\/teacher\/exams\/(\d+)$/
+    );
+
+    if (deleteExamMatch && method === "DELETE") {
+      return (await examAccess(deleteExamMatch[1]))
+        ? next()
+        : deny();
+    }
+
     const submittedAttempts = route.match(
       /^\/teacher\/exams\/(\d+)\/submitted-attempts\/(\d+)$/
     );
@@ -1360,8 +1370,25 @@ if (
           if (!enrolled) return deny();
         }
 
+        const deleteExamMatch =
+          method === "DELETE"
+            ? apiPath.match(/^\/api\/teacher\/exams\/(\d+)$/)
+            : null;
+
+        if (deleteExamMatch) {
+          const ownsExam =
+            await checkTeacherExamOwnership(
+              deleteExamMatch[1],
+              userId
+            );
+
+          if (!ownsExam) return deny();
+        }
+
         return next();
       }
+
+      
 
       // ========== INSTRUCTOR ROUTES ==========
 
