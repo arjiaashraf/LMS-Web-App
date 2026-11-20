@@ -5005,10 +5005,12 @@ VALUES (?, ?, ?, ?, ?, ?, ?, 'Online', 1, 0)
 
 // ========== INSTRUCTOR - GET CREATED EXAMS ==========
 
+// ========== INSTRUCTOR - GET CREATED EXAMS ==========
+
 app.get('/api/teacher/exams/:teacherId', (req, res) => {
   const teacherId = Number(req.params.teacherId);
   const page = Number(req.query.page || 1);
-  const limit = Math.min(50, Number(req.query.limit || 10));
+  const limit = Math.min(50, Number(req.query.limit || 20));
 
   if (
     !Number.isSafeInteger(teacherId) || teacherId <= 0 ||
@@ -5023,7 +5025,7 @@ app.get('/api/teacher/exams/:teacherId', (req, res) => {
   const offset = (page - 1) * limit;
 
   const query = `
-    SELECT DISTINCT
+    SELECT
       e.id,
       e.course_id,
       e.course_batch_id,
@@ -5042,14 +5044,18 @@ app.get('/api/teacher/exams/:teacherId', (req, res) => {
     FROM exams e
     JOIN courses c ON c.id = e.course_id
     JOIN course_batches cb ON cb.id = e.course_batch_id
-    LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
-    WHERE (
-      e.teacher_id = ?
-      OR cb.instructor_id = ?
-      OR bi.instructor_id = ?
-      OR c.proposed_by = ?
+    WHERE e.id IN (
+      SELECT DISTINCT e2.id
+      FROM exams e2
+      JOIN courses c2 ON c2.id = e2.course_id
+      JOIN course_batches cb2 ON cb2.id = e2.course_batch_id
+      LEFT JOIN batch_instructors bi2 ON bi2.batch_id = cb2.id
+      WHERE e2.teacher_id = ?
+         OR cb2.instructor_id = ?
+         OR bi2.instructor_id = ?
+         OR c2.proposed_by = ?
     )
-    ORDER BY e.exam_date DESC, e.id DESC
+    ORDER BY e.id DESC
     LIMIT ? OFFSET ?
   `;
 
@@ -5060,7 +5066,8 @@ app.get('/api/teacher/exams/:teacherId', (req, res) => {
       if (err) {
         console.error('Get instructor exams error:', err);
         return res.status(500).json({
-          message: 'Failed to fetch exams.'
+          message: 'Failed to fetch exams.',
+          error: err.sqlMessage || err.message
         });
       }
 
@@ -5068,7 +5075,6 @@ app.get('/api/teacher/exams/:teacherId', (req, res) => {
     }
   );
 });
-
 // ========== INSTRUCTOR - GET EXAM STUDENTS & RESULTS ==========
 
 app.get('/api/teacher/exam-results/:examId/:teacherId', (req, res) => {
