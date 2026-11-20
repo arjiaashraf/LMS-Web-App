@@ -1391,7 +1391,6 @@ if (
           /^\/api\/teacher\/assignment-submissions\/\d+\/(\d+)$/,
           /^\/api\/teacher\/exam-attempts\/\d+\/review\/(\d+)$/,
           /^\/api\/teacher\/exams\/\d+\/submitted-attempts\/(\d+)$/,
-          /^\/api\/teacher\/exams\/\d+\/extensions\/(\d+)$/,
           /^\/api\/teacher\/batches\/\d+\/assignment-marks\/(\d+)$/,
         ];
 
