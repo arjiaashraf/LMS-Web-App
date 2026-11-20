@@ -602,17 +602,20 @@ const checkStudentExamEnrollment = async (
   return rows.length > 0;
 };
 
-const checkTeacherExamOwnership = async (
-  examId,
-  teacherId
-) => {
+const checkTeacherExamOwnership = async (examId, teacherId) => {
   const rows = await authQuery(
-    `SELECT id
-     FROM exams
-     WHERE id = ?
-       AND teacher_id = ?
+    `SELECT e.id
+     FROM exams e
+     JOIN course_batches cb ON cb.id = e.course_batch_id
+     LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
+     WHERE e.id = ?
+       AND (
+         e.teacher_id = ?
+         OR cb.instructor_id = ?
+         OR bi.instructor_id = ?
+       )
      LIMIT 1`,
-    [examId, teacherId]
+    [examId, teacherId, teacherId, teacherId]
   );
 
   return rows.length > 0;
@@ -790,10 +793,16 @@ const route = `${req.baseUrl}${req.path}`.replace(/^\/api(?=\/)/, "");
       const rows = await authQuery(
         `SELECT e.id
          FROM exams e
+         JOIN course_batches cb ON cb.id = e.course_batch_id
+         LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
          WHERE e.id = ?
-           AND e.teacher_id = ?
+           AND (
+             e.teacher_id = ?
+             OR cb.instructor_id = ?
+             OR bi.instructor_id = ?
+           )
          LIMIT 1`,
-        [examId, teacherId]
+        [examId, teacherId, teacherId, teacherId]
       );
 
       return rows.length > 0;
@@ -8207,18 +8216,24 @@ app.put(
       await examExtensionBegin();
       transactionStarted = true;
 
-      const exams = await examExtensionQuery(
+     const exams = await examExtensionQuery(
         `SELECT
-           id,
-           exam_mode,
-           exam_status,
-           result_published,
-           course_batch_id
-         FROM exams
-         WHERE id = ?
-           AND teacher_id = ?
-         FOR UPDATE`,
-        [examId, teacherId]
+           e.id,
+           e.exam_mode,
+           e.exam_status,
+           e.result_published,
+           e.course_batch_id
+         FROM exams e
+         JOIN course_batches cb ON cb.id = e.course_batch_id
+         LEFT JOIN batch_instructors bi ON bi.batch_id = cb.id
+         WHERE e.id = ?
+           AND (
+             e.teacher_id = ?
+             OR cb.instructor_id = ?
+             OR bi.instructor_id = ?
+           )
+         LIMIT 1`,
+        [examId, teacherId, teacherId, teacherId]
       );
 
       if (!exams.length) {
