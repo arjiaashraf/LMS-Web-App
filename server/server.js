@@ -10139,7 +10139,7 @@ app.post('/api/reset-password', async (req, res) => {
   try {
     const rows = await authQuery(
       `SELECT
-         u.id,
+         u.id AS user_id,
          prc.code_hash,
          prc.attempts,
          (prc.expires_at > NOW()) AS is_valid_time
@@ -10159,6 +10159,13 @@ app.post('/api/reset-password', async (req, res) => {
     }
 
     const record = rows[0];
+    const targetUserId = Number(record.user_id);
+
+    if (!Number.isSafeInteger(targetUserId) || targetUserId <= 0) {
+      return res.status(400).json({
+        message: 'Invalid user account.'
+      });
+    }
 
     if (Number(record.attempts) >= 5) {
       return res.status(429).json({
@@ -10172,7 +10179,7 @@ app.post('/api/reset-password', async (req, res) => {
         `UPDATE password_reset_codes
          SET attempts = attempts + 1
          WHERE user_id = ?`,
-        [record.user_id]
+        [targetUserId]
       );
 
       return res.status(400).json({
@@ -10185,11 +10192,12 @@ app.post('/api/reset-password', async (req, res) => {
     const updateResult = await authQuery(
       `UPDATE users
        SET password = ?
-       WHERE id = ?`,
-      [hashedPassword, record.user_id]
+       WHERE id = ?
+         AND COALESCE(is_deleted, 0) = 0`,
+      [hashedPassword, targetUserId]
     );
 
-    if (!updateResult.affectedRows) {
+    if (!updateResult || Number(updateResult.affectedRows) < 1) {
       return res.status(400).json({
         message: 'Password could not be updated.'
       });
@@ -10198,7 +10206,7 @@ app.post('/api/reset-password', async (req, res) => {
     await authQuery(
       `DELETE FROM password_reset_codes
        WHERE user_id = ?`,
-      [record.user_id]
+      [targetUserId]
     );
 
     return res.json({
