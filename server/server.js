@@ -71,6 +71,8 @@ app.use("/api/login", loginLimiter);
 app.use("/api/register", otpLimiter);
 app.use("/api/auth/resend-otp", otpLimiter);
 app.use("/api/auth/verify-email", otpLimiter);
+app.use("/api/forgot-password", otpLimiter);
+app.use("/api/reset-password", otpLimiter);
 
 
 // PAYMENT RECEIPT UPLOAD CONFIGURATION
@@ -1247,13 +1249,15 @@ const campus95SecurityGate = async (req, res, next) => {
 
   // Only these API routes are public.
   const publicRoutes = new Set([
-    "POST /api/login",
-    "POST /api/register",
-    "POST /api/auth/verify-email",
-    "POST /api/auth/resend-otp",
-    "GET /api/payment-settings",
-    "GET /api/student/courses",
-  ]);
+  "POST /api/login",
+  "POST /api/register",
+  "POST /api/auth/verify-email",
+  "POST /api/auth/resend-otp",
+  "POST /api/forgot-password",
+  "POST /api/reset-password",
+  "GET /payment-settings",
+  "GET /student/courses",
+]);
 
   if (publicRoutes.has(`${method} ${apiPath}`)) {
     return next();
@@ -1562,14 +1566,16 @@ const campus95FinalApiGuard = (req, res, next) => {
   }
 
   // Explicit public routes.
-  const publicRoutes = new Set([
-    "POST /login",
-    "POST /register",
-    "POST /auth/verify-email",
-    "POST /auth/resend-otp",
-    "GET /payment-settings",
-    "GET /student/courses"
-  ]);
+ const publicRoutes = new Set([
+  "POST /login",
+  "POST /register",
+  "POST /auth/verify-email",
+  "POST /auth/resend-otp",
+  "POST /forgot-password",
+  "POST /reset-password",
+  "GET /payment-settings",
+  "GET /student/courses"
+]);
 
   if (publicRoutes.has(`${method} ${route}`)) {
     return next();
@@ -10090,8 +10096,21 @@ app.post('/api/forgot-password', async (req, res) => {
             return res.status(500).json({ message: 'Failed to generate reset code.' });
           }
 
-          // Yahan apne existing mailer helper se code email par bheinjein
-          // await sendResetEmail(user.email, code);
+          try {
+            await mailTransport.sendMail({
+              from: process.env.EMAIL_FROM || process.env.SMTP_USER,
+              to: user.email,
+              subject: 'Campus 95 - Password Reset Code',
+              text:
+                `Hello ${user.name || 'User'},\n\n` +
+                `Your password reset code is: ${code}\n\n` +
+                `This code expires in 15 minutes.\n\n` +
+                `If you did not request a password reset, ignore this email.`
+            });
+          } catch (mailErr) {
+            console.error('Reset email send error:', mailErr);
+          }
+
           return res.json(genericMsg);
         }
       );
