@@ -10120,9 +10120,9 @@ app.post('/api/forgot-password', async (req, res) => {
 
 // 2. Verify code & update password with bcrypt hash
 app.post('/api/reset-password', async (req, res) => {
-  const email = String(req.body.email || '').trim().toLowerCase();
-  const code = String(req.body.code || '').trim();
-  const newPassword = String(req.body.newPassword || '');
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const code = String(req.body?.code || '').trim();
+  const newPassword = String(req.body?.newPassword || '');
 
   if (!email || !code || !newPassword) {
     return res.status(400).json({
@@ -10130,65 +10130,86 @@ app.post('/api/reset-password', async (req, res) => {
     });
   }
 
-  if (newPassword.length < 8) {
+  if (newPassword.length < 8 || newPassword.length > 72) {
     return res.status(400).json({
-      message: 'New password must be at least 8 characters long.'
+      message: 'New password must be between 8 and 72 characters.'
     });
   }
 
-  db.query(
-    `SELECT u.id, prc.code_hash, prc.attempts, (prc.expires_at > NOW()) AS is_valid_time
-     FROM users u
-     JOIN password_reset_codes prc ON prc.user_id = u.id
-     WHERE LOWER(u.email) = ?
-       AND COALESCE(u.is_deleted, 0) = 0
-     LIMIT 1`,
-    [email],
-    async (err, rows) => {
-      if (err) {
-        console.error('Reset password verify error:', err);
-        return res.status(500).json({ message: 'Failed to reset password.' });
-      }
+  try {
+    const rows = await authQuery(
+      `SELECT
+         u.id,
+         prc.code_hash,
+         prc.attempts,
+         (prc.expires_at > NOW()) AS is_valid_time
+       FROM users u
+       JOIN password_reset_codes prc
+         ON prc.user_id = u.id
+       WHERE LOWER(u.email) = ?
+         AND COALESCE(u.is_deleted, 0) = 0
+       LIMIT 1`,
+      [email]
+    );
 
-      if (!rows.length || !rows[0].is_valid_time) {
-        return res.status(400).json({
-          message: 'Invalid or expired reset code.'
-        });
-      }
-
-      const record = rows[0];
-      if (Number(record.attempts) >= 5) {
-        return res.status(429).json({
-          message: 'Too many invalid code attempts. Request a new code.'
-        });
-      }
-
-      const matches = await bcrypt.compare(code, record.code_hash);
-      if (!matches) {
-        db.query(
-          `UPDATE password_reset_codes SET attempts = attempts + 1 WHERE user_id = ?`,
-          [record.user_id]
-        );
-        return res.status(400).json({ message: 'Invalid reset code.' });
-      }
-
-      const hashedPassword = await bcrypt.hash(newPassword, 12);
-
-      db.query(
-        `UPDATE users SET password = ? WHERE id = ?`,
-        [hashedPassword, record.user_id],
-        (updateErr) => {
-          if (updateErr) {
-            console.error('Update password error:', updateErr);
-            return res.status(500).json({ message: 'Failed to update password.' });
-          }
-
-          db.query(`DELETE FROM password_reset_codes WHERE user_id = ?`, [record.user_id]);
-          return res.json({ message: 'Password reset successfully. You can now log in.' });
-        }
-      );
+    if (!rows.length || Number(rows[0].is_valid_time) !== 1) {
+      return res.status(400).json({
+        message: 'Invalid or expired reset code.'
+      });
     }
-  );
+
+    const record = rows[0];
+
+    if (Number(record.attempts) >= 5) {
+      return res.status(429).json({
+        message: 'Too many invalid code attempts. Request a new code.'
+      });
+    }
+
+    const matches = await bcrypt.compare(code, record.code_hash);
+    if (!matches) {
+      await authQuery(
+        `UPDATE password_reset_codes
+         SET attempts = attempts + 1
+         WHERE user_id = ?`,
+        [record.user_id]
+      );
+
+      return res.status(400).json({
+        message: 'Invalid reset code.'
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+    const updateResult = await authQuery(
+      `UPDATE users
+       SET password = ?
+       WHERE id = ?`,
+      [hashedPassword, record.user_id]
+    );
+
+    if (!updateResult.affectedRows) {
+      return res.status(400).json({
+        message: 'Password could not be updated.'
+      });
+    }
+
+    await authQuery(
+      `DELETE FROM password_reset_codes
+       WHERE user_id = ?`,
+      [record.user_id]
+    );
+
+    return res.json({
+      message: 'Password reset successfully. You can now log in.'
+    });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    return res.status(500).json({
+      message: 'Failed to reset password.'
+    });
+  }
 });
 // START SERVER
 const PORT = process.env.PORT || 5000;
