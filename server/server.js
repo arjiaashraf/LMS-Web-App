@@ -10043,6 +10043,134 @@ app.get(
     }
   }
 );
+
+// 1. Send 6-digit reset code to registered email
+app.post('/api/forgot-password', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (!email) {
+    return res.status(400).json({ message: 'Email is required.' });
+  }
+
+  db.query(
+    `SELECT id, name, email, status, email_verified, is_deleted
+     FROM users
+     WHERE LOWER(email) = ?
+     LIMIT 1`,
+    [email],
+    async (err, rows) => {
+      if (err) {
+        console.error('Forgot password lookup error:', err);
+        return res.status(500).json({ message: 'Unable to process request.' });
+      }
+
+      // Security ke liye hamesha generic success response dein
+      const genericMsg = {
+        message: 'If this email is registered, a password reset code has been sent.'
+      };
+
+      if (!rows.length || Number(rows[0].is_deleted) === 1) {
+        return res.json(genericMsg);
+      }
+
+      const user = rows[0];
+      const code = String(crypto.randomInt(100000, 999999));
+      const codeHash = await bcrypt.hash(code, 10);
+
+      db.query(
+        `INSERT INTO password_reset_codes (user_id, code_hash, expires_at, attempts)
+         VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE), 0)
+         ON DUPLICATE KEY UPDATE
+           code_hash = VALUES(code_hash),
+           expires_at = VALUES(expires_at),
+           attempts = 0`,
+        [user.id, codeHash],
+        async (saveErr) => {
+          if (saveErr) {
+            console.error('Save reset code error:', saveErr);
+            return res.status(500).json({ message: 'Failed to generate reset code.' });
+          }
+
+          // Yahan apne existing mailer helper se code email par bheinjein
+          // await sendResetEmail(user.email, code);
+          return res.json(genericMsg);
+        }
+      );
+    }
+  );
+});
+
+// 2. Verify code & update password with bcrypt hash
+app.post('/api/reset-password', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const code = String(req.body.code || '').trim();
+  const newPassword = String(req.body.newPassword || '');
+
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({
+      message: 'Email, reset code, and new password are required.'
+    });
+  }
+
+  if (newPassword.length < 8) {
+    return res.status(400).json({
+      message: 'New password must be at least 8 characters long.'
+    });
+  }
+
+  db.query(
+    `SELECT u.id, prc.code_hash, prc.attempts, (prc.expires_at > NOW()) AS is_valid_time
+     FROM users u
+     JOIN password_reset_codes prc ON prc.user_id = u.id
+     WHERE LOWER(u.email) = ?
+       AND COALESCE(u.is_deleted, 0) = 0
+     LIMIT 1`,
+    [email],
+    async (err, rows) => {
+      if (err) {
+        console.error('Reset password verify error:', err);
+        return res.status(500).json({ message: 'Failed to reset password.' });
+      }
+
+      if (!rows.length || !rows[0].is_valid_time) {
+        return res.status(400).json({
+          message: 'Invalid or expired reset code.'
+        });
+      }
+
+      const record = rows[0];
+      if (Number(record.attempts) >= 5) {
+        return res.status(429).json({
+          message: 'Too many invalid code attempts. Request a new code.'
+        });
+      }
+
+      const matches = await bcrypt.compare(code, record.code_hash);
+      if (!matches) {
+        db.query(
+          `UPDATE password_reset_codes SET attempts = attempts + 1 WHERE user_id = ?`,
+          [record.user_id]
+        );
+        return res.status(400).json({ message: 'Invalid reset code.' });
+      }
+
+      const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+      db.query(
+        `UPDATE users SET password = ? WHERE id = ?`,
+        [hashedPassword, record.user_id],
+        (updateErr) => {
+          if (updateErr) {
+            console.error('Update password error:', updateErr);
+            return res.status(500).json({ message: 'Failed to update password.' });
+          }
+
+          db.query(`DELETE FROM password_reset_codes WHERE user_id = ?`, [record.user_id]);
+          return res.json({ message: 'Password reset successfully. You can now log in.' });
+        }
+      );
+    }
+  );
+});
 // START SERVER
 const PORT = process.env.PORT || 5000;
 
